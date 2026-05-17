@@ -661,7 +661,13 @@ for (const id of existing) {
 if (existing.length === 0) {
   createNewAgent()
 } else {
-  switchAgent(existing[0])
+  // Pick the first agent that was actually loaded into the map
+  const firstLoaded = existing.find((id) => agents.has(id))
+  if (firstLoaded) {
+    switchAgent(firstLoaded)
+  } else {
+    createNewAgent()
+  }
 }
 
 // ── Input / keyboard ──────────────────────────────────────
