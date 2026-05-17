@@ -1,6 +1,11 @@
 import { createCliRenderer, Box, TextRenderable, InputRenderable, InputRenderableEvents, t, fg } from "@opentui/core"
 import { connect } from 'luna-gateway'
 
+const cwdIndex = process.argv.indexOf('--cwd')
+if (cwdIndex !== -1 && process.argv[cwdIndex + 1]) {
+  process.env.LUNA_CWD = process.argv[cwdIndex + 1]
+}
+
 const theme = {
   bg: "#1a1b26",
   fg: "#a9b1d6",
@@ -49,7 +54,6 @@ const input = new InputRenderable(renderer, {
   focusedBackgroundColor: theme.bgHighlight,
   textColor: theme.fg,
   cursorColor: theme.blue,
-  width: 999,
 })
 
 input.on(InputRenderableEvents.ENTER, (value: string) => {
