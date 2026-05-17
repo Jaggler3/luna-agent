@@ -8,13 +8,18 @@ export interface ServerOptions {
 }
 
 export function createServer(options: ServerOptions) {
-  const { agentId, handler } = options
+  const { handler } = options
 
   async function listen() {
     const rl = createInterface({ input: process.stdin })
     for await (const line of rl) {
-      const response = await handler(line)
-      process.stdout.write(JSON.stringify({ response }) + '\n')
+      try {
+        const { message } = JSON.parse(line)
+        const response = await handler(message)
+        process.stdout.write(JSON.stringify({ response }) + '\n')
+      } catch (err) {
+        process.stdout.write(JSON.stringify({ error: String(err) }) + '\n')
+      }
     }
   }
 
@@ -40,9 +45,13 @@ export function connect(options: ConnectionOptions) {
     child.stdin!.write(JSON.stringify({ message }) + '\n')
   }
 
-  async function* receive(): AsyncGenerator<string> {
+  async function* receive(): AsyncGenerator<{ response?: string; error?: string }> {
     for await (const line of rl) {
-      yield line
+      try {
+        yield JSON.parse(line)
+      } catch {
+        yield { response: line }
+      }
     }
   }
 
