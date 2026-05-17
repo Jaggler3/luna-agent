@@ -236,7 +236,11 @@ async function executeTool(tc: ToolCall): Promise<string> {
   }
 }
 
-export async function simpleRun(prompt: string): Promise<string> {
+export interface SimpleRunCallbacks {
+  onToolCall?: (name: string, args: string) => void
+}
+
+export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks): Promise<string> {
   const messages: Msg[] = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: prompt },
@@ -250,6 +254,7 @@ export async function simpleRun(prompt: string): Promise<string> {
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       messages.push(msg)
       for (const tc of msg.tool_calls) {
+        callbacks?.onToolCall(tc.function.name, tc.function.arguments)
         const result = await executeTool(tc)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
       }

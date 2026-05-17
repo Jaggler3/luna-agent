@@ -1,4 +1,5 @@
-import { createCliRenderer, Box, Text, Input, InputRenderableEvents, t, fg, bold } from "@opentui/core"
+import { createCliRenderer, Box, Text, Input, InputRenderableEvents, t, fg } from "@opentui/core"
+import { connect } from 'luna-gateway'
 
 const theme = {
   bg: "#1a1b26",
@@ -15,6 +16,26 @@ const theme = {
 }
 
 const renderer = await createCliRenderer({ exitOnCtrlC: true })
+
+const conn = connect({
+  agentId: crypto.randomUUID(),
+  entrypoint: 'src/agent.ts',
+})
+
+let isBusy = false
+
+const messagesArea = Box({ flexGrow: 1, gap: 1 })
+const activityArea = Box({ flexGrow: 1, gap: 1 })
+
+const input = Input({
+  placeholder: "Ask the agent to do something...",
+  backgroundColor: theme.bgHighlight,
+  focusedBackgroundColor: theme.bgHighlight,
+  textColor: theme.fg,
+  cursorColor: theme.blue,
+  width: 999,
+})
+input.focus()
 
 renderer.root.add(
   Box(
@@ -35,33 +56,69 @@ renderer.root.add(
         padding: 1,
         gap: 1,
       },
-      Box(
-        { flexGrow: 1, gap: 1 },
-        Text({ content: t`${fg(theme.cyan)("luna")}  ${bold(fg(theme.comment)("— coding agent harness"))}` }),
-        Text({ content: t`${fg(theme.comment)("Your conversation with the agent will appear here. Type a message below to get started.")}` }),
-      ),
-      Input({
-        placeholder: "Ask the agent to do something...",
-        backgroundColor: theme.bgHighlight,
-        focusedBackgroundColor: theme.bgHighlight,
-        textColor: theme.fg,
-        cursorColor: theme.blue,
-        width: 999,
-      }),
+      messagesArea,
+      input,
     ),
-      Box(
-        {
-          width: 40,
-          borderStyle: "rounded",
-          borderColor: theme.border,
-          backgroundColor: theme.bg,
-          title: "Activity Pane",
-          titleColor: theme.purple,
-          padding: 1,
-          gap: 1,
-        },
-      Text({ content: t`${fg(theme.comment)("Agent actions will appear here.")}` }),
-      Text({ content: t`${fg(theme.comment)("File edits, searches, commands...")}` }),
+    Box(
+      {
+        width: 40,
+        borderStyle: "rounded",
+        borderColor: theme.border,
+        backgroundColor: theme.bg,
+        title: "Activity Pane",
+        titleColor: theme.purple,
+        padding: 1,
+        gap: 1,
+      },
+      activityArea,
     ),
   ),
 )
+
+async function sendMessage(text: string) {
+  if (isBusy) return
+  isBusy = true
+
+  messagesArea.add(Text({
+    content: t`${fg(theme.comment)(`you: ${text}`)}`,
+  }))
+
+  conn.send(text)
+
+  for await (const msg of conn.receive()) {
+    if (msg.type === 'tool_call') {
+      const name = msg.name as string
+      const args = msg.args as string
+      let label = name
+      try {
+        const parsed = JSON.parse(args)
+        label = `${name} ${Object.values(parsed).join(' ')}`
+      } catch {}
+      activityArea.add(Text({
+        content: t`${fg(theme.cyan)(`→ ${label}`)}`,
+      }))
+    } else if (msg.type === 'tool_result') {
+      // could log result details here
+    } else if (msg.response) {
+      messagesArea.add(Text({
+        content: t`${fg(theme.fg)(msg.response as string)}`,
+      }))
+      break
+    } else if (msg.error) {
+      messagesArea.add(Text({
+        content: t`${fg(theme.red)(`error: ${msg.error}`)}`,
+      }))
+      break
+    }
+  }
+
+  isBusy = false
+  input.focus()
+}
+
+input.on(InputRenderableEvents.ENTER, (value: string) => {
+  if (value.trim() && !isBusy) {
+    input.value = ''
+    sendMessage(value)
+  }
+})
