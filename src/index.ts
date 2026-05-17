@@ -35,6 +35,14 @@ const input = Input({
   cursorColor: theme.blue,
   width: 999,
 })
+
+input.on(InputRenderableEvents.ENTER, (value: string) => {
+  if (value.trim() && !isBusy) {
+    input.value = ''
+    sendMessage(value)
+  }
+})
+
 input.focus()
 
 renderer.root.add(
@@ -115,10 +123,3 @@ async function sendMessage(text: string) {
   isBusy = false
   input.focus()
 }
-
-input.on(InputRenderableEvents.ENTER, (value: string) => {
-  if (value.trim() && !isBusy) {
-    input.value = ''
-    sendMessage(value)
-  }
-})
