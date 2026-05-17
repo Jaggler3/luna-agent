@@ -1,4 +1,4 @@
-import { createCliRenderer, Box, Text, InputRenderable, InputRenderableEvents, t, fg } from "@opentui/core"
+import { createCliRenderer, Box, TextRenderable, InputRenderable, InputRenderableEvents, t, fg } from "@opentui/core"
 import { connect } from 'luna-gateway'
 
 const theme = {
@@ -23,9 +23,24 @@ const conn = connect({
 })
 
 let isBusy = false
+let conversationLines: string[] = []
+let activityLines: string[] = []
+
+const conversationText = new TextRenderable(renderer, {
+  id: 'conversation-content',
+  content: t`${fg(theme.comment)("Your conversation with the agent will appear here.")}`,
+})
+
+const activityText = new TextRenderable(renderer, {
+  id: 'activity-content',
+  content: t`${fg(theme.comment)("Agent actions will appear here.")}`,
+})
 
 const messagesArea = Box({ flexGrow: 1, gap: 1 })
 const activityArea = Box({ flexGrow: 1, gap: 1 })
+
+messagesArea.add(conversationText)
+activityArea.add(activityText)
 
 const input = new InputRenderable(renderer, {
   id: 'main-input',
@@ -84,17 +99,24 @@ renderer.root.add(
   ),
 )
 
+function updateConversation() {
+  conversationText.content = conversationLines.join('\n')
+}
+
+function updateActivity() {
+  activityText.content = activityLines.join('\n')
+}
+
 async function sendMessage(text: string) {
   if (isBusy) return
   isBusy = true
 
-  messagesArea.add(Text({
-    content: t`${fg(theme.comment)(`you: ${text}`)}`,
-  }))
+  conversationLines.push(`you: ${text}`)
+  updateConversation()
 
   if (conn.child.exitCode !== null) {
-    const err = `agent exited (code ${conn.child.exitCode})`
-    messagesArea.add(Text({ content: t`${fg(theme.red)(err)}` }))
+    conversationLines.push(`agent exited (code ${conn.child.exitCode})`)
+    updateConversation()
     isBusy = false
     input.focus()
     return
@@ -103,7 +125,8 @@ async function sendMessage(text: string) {
   conn.send(text)
 
   const timeout = setTimeout(() => {
-    messagesArea.add(Text({ content: t`${fg(theme.red)("timed out waiting for agent")}` }))
+    conversationLines.push('timed out waiting for agent')
+    updateConversation()
     isBusy = false
     input.focus()
   }, 120_000)
@@ -118,27 +141,21 @@ async function sendMessage(text: string) {
           const parsed = JSON.parse(args)
           label = `${name} ${Object.values(parsed).join(' ')}`
         } catch {}
-        activityArea.add(Text({
-          content: t`${fg(theme.cyan)(`→ ${label}`)}`,
-        }))
-      } else if (msg.type === 'tool_result') {
-        // could log result details here
+        activityLines.push(`→ ${label}`)
+        updateActivity()
       } else if (msg.response) {
-        messagesArea.add(Text({
-          content: t`${fg(theme.fg)(msg.response as string)}`,
-        }))
+        conversationLines.push(msg.response as string)
+        updateConversation()
         break
       } else if (msg.error) {
-        messagesArea.add(Text({
-          content: t`${fg(theme.red)(`error: ${msg.error}`)}`,
-        }))
+        conversationLines.push(`error: ${msg.error}`)
+        updateConversation()
         break
       }
     }
   } catch (err) {
-    messagesArea.add(Text({
-      content: t`${fg(theme.red)(`error: ${err}`)}`,
-    }))
+    conversationLines.push(`error: ${err}`)
+    updateConversation()
   } finally {
     clearTimeout(timeout)
     isBusy = false
