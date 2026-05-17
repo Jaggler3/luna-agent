@@ -1,11 +1,16 @@
-import { createCliRenderer, Box, TextRenderable, InputRenderable, InputRenderableEvents, StyledText, t, fg } from "@opentui/core"
+import { createCliRenderer, Box, TextRenderable, InputRenderable, InputRenderableEvents, StyledText, t, fg, bg } from "@opentui/core"
 import type { TextChunk } from "@opentui/core"
 import { connect } from 'luna-gateway'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 
 const cwdIndex = process.argv.indexOf('--cwd')
 if (cwdIndex !== -1 && process.argv[cwdIndex + 1]) {
   process.env.LUNA_CWD = process.argv[cwdIndex + 1]
 }
+
+const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 
 const theme = {
   bg: "#1a1b26",
@@ -23,8 +28,9 @@ const theme = {
 
 const renderer = await createCliRenderer({ exitOnCtrlC: true })
 
+const agentId = crypto.randomUUID()
 const conn = connect({
-  agentId: crypto.randomUUID(),
+  agentId,
   entrypoint: 'src/agent.ts',
 })
 
@@ -44,11 +50,18 @@ const activityText = new TextRenderable(renderer, {
   content: t`${fg(theme.comment)("Agent actions will appear here.")}`,
 })
 
+const tabText = new TextRenderable(renderer, {
+  id: 'agent-tabs',
+  content: '',
+})
+
 const messagesArea = Box({ flexGrow: 1, gap: 1 })
 const activityArea = Box({ flexGrow: 1, gap: 1 })
+const tabArea = Box({ flexDirection: 'column', gap: 1, width: 6 })
 
 messagesArea.add(conversationText)
 activityArea.add(activityText)
+tabArea.add(tabText)
 
 const input = new InputRenderable(renderer, {
   id: 'main-input',
@@ -92,7 +105,7 @@ renderer.root.add(
     ),
     Box(
       {
-        width: 40,
+        width: 38,
         borderStyle: "rounded",
         borderColor: theme.border,
         backgroundColor: theme.bg,
@@ -103,8 +116,56 @@ renderer.root.add(
       },
       activityArea,
     ),
+    Box(
+      {
+        width: 6,
+        flexDirection: "column",
+        gap: 1,
+        paddingTop: 2,
+      },
+      tabArea,
+    ),
   ),
 )
+
+function scanAgentDirs(): string[] {
+  if (!existsSync(AGENTS_DIR)) return []
+  try {
+    return readdirSync(AGENTS_DIR).filter((name) => {
+      try {
+        return statSync(join(AGENTS_DIR, name)).isDirectory()
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+function updateTabs() {
+  const chunks: TextChunk[] = []
+  const existing = scanAgentDirs()
+  const all = [agentId, ...existing.filter((id) => id !== agentId)]
+
+  for (let i = 0; i < all.length; i++) {
+    if (i > 0) chunks.push({ __isChunk: true, text: '\n' })
+    const abbr = all[i].slice(0, 5)
+    const isActive = all[i] === agentId
+    if (isActive) {
+      chunks.push(bg(theme.bgHighlight)(fg(theme.blue)(` ${abbr} `)))
+    } else {
+      chunks.push(fg(theme.comment)(` ${abbr} `))
+    }
+  }
+
+  chunks.push({ __isChunk: true, text: '\n' })
+  chunks.push(fg(theme.green)('  +  '))
+
+  tabText.content = new StyledText(chunks)
+}
+
+updateTabs()
 
 function updateConversation() {
   const chunks: TextChunk[] = []
