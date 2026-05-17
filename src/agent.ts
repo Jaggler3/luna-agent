@@ -1,8 +1,12 @@
 import { simpleRun } from 'luna-code'
 import { createServer } from 'luna-gateway'
 
+const transport = (process.env.LUNA_TRANSPORT as 'socket' | undefined) ?? 'stdio'
+
 const server = createServer({
   agentId: process.env.AGENT_ID ?? 'agent',
+  transport,
+  socketPath: process.env.LUNA_SOCKET_PATH,
   handler: async (prompt, emit) => {
     await simpleRun(prompt, {
       onToolCall: (name, args) => emit({ type: 'tool_call', name, args }),
