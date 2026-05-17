@@ -1,0 +1,14 @@
+{
+  "name": "luna",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.2.12",
+    "luna-code": "workspace:*",
+    "luna-gateway": "workspace:*"
+  }
+}
