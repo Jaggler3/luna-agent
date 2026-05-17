@@ -332,6 +332,21 @@ function checkHealth() {
   updateTabs()
 }
 
+function waitForSocketFile(sockPath: string, timeout: number): Promise<void> {
+  const start = Date.now()
+  return new Promise((resolve, reject) => {
+    function poll() {
+      try { existsSync(sockPath) && resolve(); return } catch {}
+      if (Date.now() - start > timeout) {
+        reject(new Error('Agent socket did not appear'))
+      } else {
+        setTimeout(poll, 200)
+      }
+    }
+    poll()
+  })
+}
+
 // ── Agent lifecycle ───────────────────────────────────────
 async function startAgent(id: string): Promise<Connection | null> {
   const entrypoint = 'src/agent.ts'
@@ -350,38 +365,19 @@ async function startAgent(id: string): Promise<Connection | null> {
     socketPath: sockPath,
   })
 
-  await new Promise<void>((resolve, reject) => {
-    const maxWait = 15000
-    const start = Date.now()
-    function poll() {
-      if (conn.child?.pid) {
-        meta.pid = conn.child.pid!
-        saveMeta(id, meta)
-        resolve()
-        return
-      }
-      if (Date.now() - start > maxWait) {
-        reject(new Error('Agent process did not start'))
-        return
-      }
-      setTimeout(poll, 200)
-    }
-    if (conn.child) {
-      conn.child.on('spawn', () => {
-        meta.pid = conn.child!.pid!
-        saveMeta(id, meta)
-      })
-    }
-    poll()
-  })
+  if (conn.child?.pid) {
+    meta.pid = conn.child.pid
+    saveMeta(id, meta)
+  }
 
-  const sock = await connectSocket(sockPath).catch(() => null)
-  if (!sock) {
+  try {
+    await waitForSocketFile(sockPath, 10000)
+  } catch {
     conn.child?.kill()
     return null
   }
 
-  return sock
+  return conn
 }
 
 async function ensureRunning(a: AgentData): Promise<void> {
@@ -677,6 +673,8 @@ renderer.root.add(
 
 // ── Health polling ────────────────────────────────────────
 const healthTimer = setInterval(checkHealth, 3000)
-process.on('exit', () => clearInterval(healthTimer))
+function cancelHealth() { clearInterval(healthTimer) }
+process.on('SIGINT', cancelHealth)
+process.on('SIGTERM', cancelHealth)
 updateBoxTitle()
 updateTabs()
