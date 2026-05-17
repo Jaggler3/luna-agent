@@ -37,7 +37,16 @@ export interface ConnectionOptions {
   entrypoint: string
 }
 
-export function connect(options: ConnectionOptions) {
+export interface Connection {
+  send: (message: string) => void
+  receive: () => AsyncGenerator<GatewayMessage>
+  getStderr: () => string
+  kill: () => void
+  exited: Promise<number | null>
+  child: ChildProcess
+}
+
+export function connect(options: ConnectionOptions): Connection {
   const { entrypoint } = options
 
   const child: ChildProcess = spawn('bun', ['run', entrypoint], {
@@ -45,7 +54,8 @@ export function connect(options: ConnectionOptions) {
     env: { ...process.env, AGENT_ID: options.agentId },
   })
 
-  child.stderr?.pipe(process.stderr)
+  const stderrChunks: Buffer[] = []
+  child.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk))
 
   const rl = createInterface({ input: child.stdout! })
 
@@ -63,5 +73,17 @@ export function connect(options: ConnectionOptions) {
     }
   }
 
-  return { send, receive, child }
+  function getStderr(): string {
+    return Buffer.concat(stderrChunks).toString()
+  }
+
+  function kill() {
+    child.kill()
+  }
+
+  const exited = new Promise<number | null>((resolve) => {
+    child.on('exit', (code) => resolve(code))
+  })
+
+  return { send, receive, getStderr, kill, exited, child }
 }

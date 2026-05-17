@@ -92,35 +92,56 @@ async function sendMessage(text: string) {
     content: t`${fg(theme.comment)(`you: ${text}`)}`,
   }))
 
-  conn.send(text)
-
-  for await (const msg of conn.receive()) {
-    if (msg.type === 'tool_call') {
-      const name = msg.name as string
-      const args = msg.args as string
-      let label = name
-      try {
-        const parsed = JSON.parse(args)
-        label = `${name} ${Object.values(parsed).join(' ')}`
-      } catch {}
-      activityArea.add(Text({
-        content: t`${fg(theme.cyan)(`→ ${label}`)}`,
-      }))
-    } else if (msg.type === 'tool_result') {
-      // could log result details here
-    } else if (msg.response) {
-      messagesArea.add(Text({
-        content: t`${fg(theme.fg)(msg.response as string)}`,
-      }))
-      break
-    } else if (msg.error) {
-      messagesArea.add(Text({
-        content: t`${fg(theme.red)(`error: ${msg.error}`)}`,
-      }))
-      break
-    }
+  if (conn.child.exitCode !== null) {
+    const err = `agent exited (code ${conn.child.exitCode})`
+    messagesArea.add(Text({ content: t`${fg(theme.red)(err)}` }))
+    isBusy = false
+    input.focus()
+    return
   }
 
-  isBusy = false
-  input.focus()
+  conn.send(text)
+
+  const timeout = setTimeout(() => {
+    messagesArea.add(Text({ content: t`${fg(theme.red)("timed out waiting for agent")}` }))
+    isBusy = false
+    input.focus()
+  }, 120_000)
+
+  try {
+    for await (const msg of conn.receive()) {
+      if (msg.type === 'tool_call') {
+        const name = msg.name as string
+        const args = msg.args as string
+        let label = name
+        try {
+          const parsed = JSON.parse(args)
+          label = `${name} ${Object.values(parsed).join(' ')}`
+        } catch {}
+        activityArea.add(Text({
+          content: t`${fg(theme.cyan)(`→ ${label}`)}`,
+        }))
+      } else if (msg.type === 'tool_result') {
+        // could log result details here
+      } else if (msg.response) {
+        messagesArea.add(Text({
+          content: t`${fg(theme.fg)(msg.response as string)}`,
+        }))
+        break
+      } else if (msg.error) {
+        messagesArea.add(Text({
+          content: t`${fg(theme.red)(`error: ${msg.error}`)}`,
+        }))
+        break
+      }
+    }
+  } catch (err) {
+    messagesArea.add(Text({
+      content: t`${fg(theme.red)(`error: ${err}`)}`,
+    }))
+  } finally {
+    clearTimeout(timeout)
+    isBusy = false
+    input.focus()
+  }
 }
