@@ -1,4 +1,5 @@
-import { createCliRenderer, Box, TextRenderable, InputRenderable, InputRenderableEvents, t, fg } from "@opentui/core"
+import { createCliRenderer, Box, TextRenderable, InputRenderable, InputRenderableEvents, StyledText, t, fg } from "@opentui/core"
+import type { TextChunk } from "@opentui/core"
 import { connect } from 'luna-gateway'
 
 const cwdIndex = process.argv.indexOf('--cwd')
@@ -106,7 +107,23 @@ renderer.root.add(
 )
 
 function updateConversation() {
-  conversationText.content = conversationLines.join('\n')
+  const chunks: TextChunk[] = []
+  for (let i = 0; i < conversationLines.length; i++) {
+    if (i > 0) chunks.push({ __isChunk: true, text: '\n' })
+    const line = conversationLines[i]
+    if (line.startsWith('you: ')) {
+      chunks.push(fg(theme.blue)(`> ${line.slice(5)}`))
+    } else if (line.startsWith('agent: ')) {
+      const text = line.slice(7)
+      if (!text) continue
+      chunks.push(fg(theme.fg)(`  ${text}`))
+    } else if (line.startsWith('error:')) {
+      chunks.push(fg(theme.red)(line))
+    } else {
+      chunks.push({ __isChunk: true, text: line })
+    }
+  }
+  conversationText.content = new StyledText(chunks)
 }
 
 function updateActivity() {
