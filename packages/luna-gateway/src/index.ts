@@ -62,14 +62,57 @@ export function connect(options: ConnectionOptions): Connection {
     child.stdin!.write(JSON.stringify({ message }) + '\n')
   }
 
-  async function* receive(): AsyncGenerator<GatewayMessage> {
-    for await (const line of rl) {
-      try {
-        yield JSON.parse(line)
-      } catch {
-        yield { type: 'error', error: line }
+  function receive(): AsyncGenerator<GatewayMessage> {
+    const buffer: string[] = []
+    let pending: ((value: IteratorResult<GatewayMessage>) => void) | null = null
+    let closed = false
+
+    rl.on('line', (line: string) => {
+      if (pending) {
+        const p = pending
+        pending = null
+        try {
+          p({ value: JSON.parse(line), done: false })
+        } catch {
+          p({ value: { type: 'error', error: line }, done: false })
+        }
+      } else {
+        buffer.push(line)
       }
-    }
+    })
+
+    rl.on('close', () => {
+      closed = true
+      if (pending) {
+        pending({ value: undefined as any, done: true })
+      }
+    })
+
+    return {
+      [Symbol.asyncIterator]() {
+        return this
+      },
+      next(): Promise<IteratorResult<GatewayMessage>> {
+        if (buffer.length > 0) {
+          const line = buffer.shift()!
+          try {
+            return Promise.resolve({ value: JSON.parse(line), done: false })
+          } catch {
+            return Promise.resolve({ value: { type: 'error', error: line }, done: false })
+          }
+        }
+        if (closed) {
+          return Promise.resolve({ value: undefined as any, done: true })
+        }
+        return new Promise((resolve) => {
+          pending = resolve
+        })
+      },
+      return(): Promise<IteratorResult<GatewayMessage>> {
+        pending = null
+        return Promise.resolve({ value: undefined as any, done: true })
+      },
+    } as AsyncGenerator<GatewayMessage>
   }
 
   function getStderr(): string {

@@ -220,8 +220,12 @@ async function sendMessage(text: string) {
     input.focus()
   }, 120_000)
 
+  const iter = conn.receive()
   try {
-    for await (const msg of conn.receive()) {
+    while (true) {
+      const result = await iter.next()
+      if (result.done) break
+      const msg = result.value
       switch (msg.type) {
         case 'token': {
           currentAgentContent += msg.content as string
