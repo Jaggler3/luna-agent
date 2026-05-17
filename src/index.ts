@@ -1,4 +1,4 @@
-import { createCliRenderer, Box, Text, Input, InputRenderableEvents, t, fg } from "@opentui/core"
+import { createCliRenderer, Box, Text, InputRenderable, InputRenderableEvents, t, fg } from "@opentui/core"
 import { connect } from 'luna-gateway'
 
 const theme = {
@@ -27,7 +27,8 @@ let isBusy = false
 const messagesArea = Box({ flexGrow: 1, gap: 1 })
 const activityArea = Box({ flexGrow: 1, gap: 1 })
 
-const input = Input({
+const input = new InputRenderable(renderer, {
+  id: 'main-input',
   placeholder: "Ask the agent to do something...",
   backgroundColor: theme.bgHighlight,
   focusedBackgroundColor: theme.bgHighlight,
