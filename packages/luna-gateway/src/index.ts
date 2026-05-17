@@ -201,40 +201,49 @@ export function connect(options: ConnectionOptions): Connection {
 
     const connectPromise = waitForSocket(socketPath).then(() => createSocketConnection(socketPath))
 
+    // On connection failure, close the receive stream so the consumer isn't stuck forever
+    const onConnFail = () => {
+      // The send/receive .then callbacks never ran, so the consumer is stuck.
+      // We flag an error via closed=true so next() returns done.
+    }
+
     return {
       send(message: string) {
-        connectPromise.then((socket) => {
-          socket.write(JSON.stringify({ message }) + '\n')
-        })
+        connectPromise.then(
+          (socket) => socket.write(JSON.stringify({ message }) + '\n'),
+          () => {},  // connect failed — silent drop (caller handles via receive)
+        )
       },
       receive() {
         const buffer: string[] = []
         let pending: ((value: IteratorResult<GatewayMessage>) => void) | null = null
         let closed = false
+        let connFailed = false
 
-        let rl: ReturnType<typeof createInterface> | null = null
-        let socket: Socket | null = null
-
-        connectPromise.then((s) => {
-          socket = s
-          rl = createInterface({ input: s })
-          rl.on('line', (line: string) => {
-            if (pending) {
-              const p = pending
-              pending = null
-              try { p({ value: JSON.parse(line), done: false }) }
-              catch { p({ value: { type: 'error', error: line }, done: false }) }
-            } else {
-              buffer.push(line)
-            }
-          })
-          rl.on('close', () => {
+        connectPromise.then(
+          (s) => {
+            const rl = createInterface({ input: s })
+            rl.on('line', (line: string) => {
+              if (pending) {
+                const p = pending
+                pending = null
+                try { p({ value: JSON.parse(line), done: false }) }
+                catch { p({ value: { type: 'error', error: line }, done: false }) }
+              } else {
+                buffer.push(line)
+              }
+            })
+            rl.on('close', () => {
+              closed = true
+              if (pending) pending({ value: undefined as any, done: true })
+            })
+          },
+          () => {
+            connFailed = true
             closed = true
             if (pending) pending({ value: undefined as any, done: true })
-          })
-          // Flush any buffered lines
-          while (buffer.length > 0 && pending) { /* already handled by event */ }
-        })
+          },
+        )
 
         return {
           [Symbol.asyncIterator]() { return this },

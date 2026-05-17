@@ -5,7 +5,17 @@ import type { Connection } from 'luna-gateway'
 import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, readdirSync, statSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync } from 'node:fs'
+
+const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
+function log(...args: unknown[]) {
+  try {
+    const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`
+    appendFileSync(LOG_FILE, line + '\n')
+  } catch {}
+}
+
+log('APP START')
 
 class BrailleBreathe {
   private frame = 0
@@ -60,6 +70,7 @@ const syntaxStyle = SyntaxStyle.fromStyles({
 })
 
 const renderer = await createCliRenderer({ exitOnCtrlC: true })
+log('RENDERER CREATED')
 
 const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 mkdirSync(AGENTS_DIR, { recursive: true })
@@ -224,71 +235,72 @@ function activeAgent(): AgentData | null {
 }
 
 function updateBoxTitle() {
-  const a = activeAgent()
-  if (!a) {
-    conversationBox.title = 'Conversation'
-    return
-  }
-  const dot = a.isRunning ? ' ●' : ' ○'
-  const pid = a.meta.pid && a.isRunning ? ` (PID ${a.meta.pid})` : ''
-  conversationBox.title = `${a.meta.name}${pid}`
+  try {
+    const a = activeAgent()
+    if (!a) {
+      conversationBox.title = 'Conversation'
+      return
+    }
+    const dot = a.isRunning ? ' ●' : ' ○'
+    const pid = a.meta.pid && a.isRunning ? ` (PID ${a.meta.pid})` : ''
+    conversationBox.title = `${a.meta.name}${pid}`
+  } catch (e) { log('updateBoxTitle error', e) }
 }
 
 function updateConversation() {
-  const a = activeAgent()
-  if (!a) {
-    markdownConversation.content = ''
-    return
-  }
-  if (a.conversationLines.length === 0) {
-    markdownConversation.content = ''
-    return
-  }
-  const parts: string[] = []
-  for (let i = 0; i < a.conversationLines.length; i++) {
-    if (parts.length > 0) parts.push('\n\n')
-    const line = a.conversationLines[i]
-    if (line.startsWith('you: ')) {
-      const content = line.slice(5)
-      parts.push(`> **You:** ${content.replace(/\n/g, '\n> ')}`)
-    } else if (line.startsWith('agent: ')) {
-      const text = line.slice(7)
-      if (!text) continue
-      parts.push(text)
-    } else {
-      parts.push(line)
+  try {
+    const a = activeAgent()
+    if (!a) { markdownConversation.content = ''; return }
+    if (a.conversationLines.length === 0) { markdownConversation.content = ''; return }
+    const parts: string[] = []
+    for (let i = 0; i < a.conversationLines.length; i++) {
+      if (parts.length > 0) parts.push('\n\n')
+      const line = a.conversationLines[i]
+      if (line.startsWith('you: ')) {
+        parts.push(`> **You:** ${line.slice(5).replace(/\n/g, '\n> ')}`)
+      } else if (line.startsWith('agent: ')) {
+        const text = line.slice(7)
+        if (!text) continue
+        parts.push(text)
+      } else {
+        parts.push(line)
+      }
     }
-  }
-  markdownConversation.content = parts.join('')
+    markdownConversation.content = parts.join('')
+  } catch (e) { log('updateConversation error', e) }
 }
 
 function updateActivity() {
-  const a = activeAgent()
-  activityText.content = a ? a.activityLines.join('\n') : ''
+  try {
+    const a = activeAgent()
+    activityText.content = a ? a.activityLines.join('\n') : ''
+  } catch (e) { log('updateActivity error', e) }
 }
 
 function updateTabs() {
-  const chunks: TextChunk[] = []
-  const ids = scanAgents()
-  for (const id of ids) {
-    const a = agents.get(id)
-    if (!a) continue
-    if (chunks.length > 0) chunks.push({ __isChunk: true, text: '\n' })
-    const isActive = id === activeId
-    const dot = a.isRunning ? fg(theme.green)('●') : fg(theme.comment)('○')
-    if (isActive) {
-      chunks.push(bg(theme.bgHighlight)(` ${dot} ${fg(theme.blue)(a.meta.name.padEnd(11).slice(0, 11))} `))
-    } else {
-      chunks.push(fg(theme.comment)(` ${dot} ${a.meta.name.padEnd(11).slice(0, 11)} `))
+  try {
+    const chunks: TextChunk[] = []
+    const ids = scanAgents()
+    for (const id of ids) {
+      const a = agents.get(id)
+      if (!a) continue
+      if (chunks.length > 0) chunks.push({ __isChunk: true, text: '\n' })
+      const isActive = id === activeId
+      const dot = a.isRunning ? fg(theme.green)('●') : fg(theme.comment)('○')
+      if (isActive) {
+        chunks.push(bg(theme.bgHighlight)(` ${dot} ${fg(theme.blue)(a.meta.name.padEnd(11).slice(0, 11))} `))
+      } else {
+        chunks.push(fg(theme.comment)(` ${dot} ${a.meta.name.padEnd(11).slice(0, 11)} `))
+      }
     }
-  }
-  if (chunks.length > 0) {
+    if (chunks.length > 0) {
+      chunks.push({ __isChunk: true, text: '\n' })
+      chunks.push(fg(theme.comment)(`${'─'.repeat(17)}`))
+    }
     chunks.push({ __isChunk: true, text: '\n' })
-    chunks.push(fg(theme.comment)(`${'─'.repeat(17)}`))
-  }
-  chunks.push({ __isChunk: true, text: '\n' })
-  chunks.push(fg(theme.green)('  + new agent'))
-  tabText.content = new StyledText(chunks)
+    chunks.push(fg(theme.green)('  + new agent'))
+    tabText.content = new StyledText(chunks)
+  } catch (e) { log('updateTabs error', e) }
 }
 
 function handleSlashCommand(value: string): boolean {
@@ -312,31 +324,37 @@ function handleSlashCommand(value: string): boolean {
 
 // ── Health check ──────────────────────────────────────────
 function checkHealth() {
-  for (const [, a] of agents) {
-    if (a.meta.pid) {
-      const wasRunning = a.isRunning
-      a.isRunning = isPidRunning(a.meta.pid)
-      if (wasRunning && !a.isRunning) {
-        if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
-        if (a.anim) a.anim.free()
-        if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
-        if (a.conn) {
-          try { a.conn.kill() } catch {}
+  try {
+    for (const [, a] of agents) {
+      if (a.meta.pid) {
+        const wasRunning = a.isRunning
+        a.isRunning = isPidRunning(a.meta.pid)
+        if (wasRunning && !a.isRunning) {
+          log('agent died', a.id)
+          if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+          if (a.anim) a.anim.free()
+          if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
+          if (a.conn) {
+            try { a.conn.kill() } catch {}
+          }
         }
+      } else {
+        a.isRunning = false
       }
-    } else {
-      a.isRunning = false
     }
-  }
-  updateBoxTitle()
-  updateTabs()
+    updateBoxTitle()
+    updateTabs()
+  } catch (e) { log('checkHealth error', e) }
 }
 
+// ── Agent lifecycle ───────────────────────────────────────
 function waitForSocketFile(sockPath: string, timeout: number): Promise<void> {
   const start = Date.now()
   return new Promise((resolve, reject) => {
     function poll() {
-      try { existsSync(sockPath) && resolve(); return } catch {}
+      try {
+        if (existsSync(sockPath)) { resolve(); return }
+      } catch {}
       if (Date.now() - start > timeout) {
         reject(new Error('Agent socket did not appear'))
       } else {
@@ -347,15 +365,14 @@ function waitForSocketFile(sockPath: string, timeout: number): Promise<void> {
   })
 }
 
-// ── Agent lifecycle ───────────────────────────────────────
 async function startAgent(id: string): Promise<Connection | null> {
+  log('startAgent begin', id)
   const entrypoint = 'src/agent.ts'
   const sockPath = socketPath(id)
   const agentDir = join(AGENTS_DIR, id)
   mkdirSync(agentDir, { recursive: true })
 
   const meta = loadMeta(id) ?? { name: 'agent', pid: null, createdAt: new Date().toISOString() }
-
   try { unlinkSync(sockPath) } catch {}
 
   const conn = connect({
@@ -364,30 +381,37 @@ async function startAgent(id: string): Promise<Connection | null> {
     transport: 'socket',
     socketPath: sockPath,
   })
+  log('connect() returned, child.pid:', conn.child?.pid)
 
   if (conn.child?.pid) {
     meta.pid = conn.child.pid
     saveMeta(id, meta)
+    log('saved pid', meta.pid)
   }
 
   try {
     await waitForSocketFile(sockPath, 10000)
-  } catch {
+    log('socket file appeared', sockPath)
+  } catch (e) {
+    log('socket file never appeared', e)
     conn.child?.kill()
     return null
   }
 
+  log('startAgent success', id)
   return conn
 }
 
 async function ensureRunning(a: AgentData): Promise<void> {
-  if (a.conn && a.isRunning) return
+  log('ensureRunning begin', a.id, 'conn:', !!a.conn, 'running:', a.isRunning)
+  if (a.conn && a.isRunning) { log('ensureRunning already running'); return }
   if (a.conn) {
     try { a.conn.kill() } catch {}
     a.conn = null
   }
-  a.conn = await startAgent(a.id).catch(() => null)
+  a.conn = await startAgent(a.id).catch((e) => { log('startAgent failed', e); return null })
   a.isRunning = a.conn !== null
+  log('ensureRunning done, running:', a.isRunning)
   if (!a.conn) {
     a.conversationLines.push('error: failed to start agent')
     updateConversation()
@@ -419,7 +443,8 @@ async function deriveConversationName(prompt: string): Promise<string | null> {
 
 async function sendMessage(text: string) {
   const a = activeAgent()
-  if (!a || a.isBusy) return
+  log('sendMessage', text.slice(0, 50), 'agent:', a?.id, 'busy:', a?.isBusy)
+  if (!a || a.isBusy) { log('sendMessage skipped'); return }
   a.isBusy = true
 
   await ensureRunning(a)
@@ -430,6 +455,7 @@ async function sendMessage(text: string) {
     input.focus()
     return
   }
+  log('sendMessage connection ready')
 
   a.conversationLines.push(`you: ${text}`)
   updateConversation()
@@ -442,6 +468,7 @@ async function sendMessage(text: string) {
   updateConversation()
 
   a.conn.send(text)
+  log('sendMessage sent')
 
   const anim = new BrailleBreathe()
   a.anim = anim
@@ -451,6 +478,7 @@ async function sendMessage(text: string) {
   }, 80)
 
   a.timeout = setTimeout(() => {
+    log('sendMessage timeout')
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
     anim.free()
     markdownConversation.streaming = false
@@ -464,7 +492,10 @@ async function sendMessage(text: string) {
   try {
     while (true) {
       const result = await iter.next()
-      if (result.done) break
+      if (result.done) {
+        log('sendMessage receive loop done (connection closed)')
+        break
+      }
       const msg = result.value
       switch (msg.type) {
         case 'token': {
@@ -509,6 +540,7 @@ async function sendMessage(text: string) {
           break
         }
         case 'done':
+          log('sendMessage done')
           if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
           anim.free()
           markdownConversation.streaming = false
@@ -516,6 +548,7 @@ async function sendMessage(text: string) {
           saveConversation(a.id, a.messages, a.activity)
           return
         case 'error':
+          log('sendMessage agent error:', msg.error)
           if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
           anim.free()
           markdownConversation.streaming = false
@@ -524,7 +557,12 @@ async function sendMessage(text: string) {
           return
       }
     }
+    // receive loop ended without done/error — show error
+    markdownConversation.streaming = false
+    a.conversationLines.push('error: connection to agent lost')
+    updateConversation()
   } catch (err) {
+    log('sendMessage exception:', err)
     markdownConversation.streaming = false
     a.conversationLines.push(`error: ${err}`)
     updateConversation()
@@ -539,6 +577,7 @@ async function sendMessage(text: string) {
 
 function switchAgent(id: string) {
   if (id === activeId) return
+  log('switchAgent', id)
   activeId = id
   if (markdownConversation.streaming) markdownConversation.streaming = false
   updateConversation()
@@ -563,6 +602,7 @@ function createNewAgent() {
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }
   agents.set(id, data)
+  log('createNewAgent', id)
   switchAgent(id)
 }
 
@@ -570,20 +610,19 @@ function switchToNextAgent() {
   const ids = scanAgents()
   if (ids.length === 0) return
   const idx = activeId ? ids.indexOf(activeId) : -1
-  const next = (idx + 1) % ids.length
-  switchAgent(ids[next])
+  switchAgent(ids[(idx + 1) % ids.length])
 }
 
 function switchToPrevAgent() {
   const ids = scanAgents()
   if (ids.length === 0) return
   const idx = activeId ? ids.indexOf(activeId) : 0
-  const prev = (idx - 1 + ids.length) % ids.length
-  switchAgent(ids[prev])
+  switchAgent(ids[(idx - 1 + ids.length) % ids.length])
 }
 
 // ── Init existing agents ──────────────────────────────────
 const existing = scanAgents()
+log('existing agents:', existing.length)
 for (const id of existing) {
   const meta = loadMeta(id)
   if (!meta) continue
@@ -594,11 +633,14 @@ for (const id of existing) {
   let isRunning = false
   let conn: Connection | null = null
   if (meta.pid && isPidRunning(meta.pid)) {
+    log('reconnecting to agent', id, 'pid:', meta.pid)
     isRunning = true
     conn = await connectSocket(socketPath(id)).catch(() => {
+      log('reconnect failed for', id)
       isRunning = false
       return null
     })
+    if (conn) log('reconnected to', id)
   }
 
   const conversationLines: string[] = []
@@ -624,10 +666,13 @@ if (existing.length === 0) {
 
 // ── Input / keyboard ──────────────────────────────────────
 input.on(InputRenderableEvents.ENTER, (value: string) => {
+  log('ENTER pressed, value length:', value.length)
   if (value.trim() && !activeAgent()?.isBusy) {
     input.value = ''
     if (handleSlashCommand(value.trim())) return
     sendMessage(value)
+  } else {
+    log('ENTER ignored', { trimmed: !!value.trim(), busy: activeAgent()?.isBusy })
   }
 })
 
@@ -637,12 +682,7 @@ renderer.keyInput.on("keypress", (event) => {
     const sel = renderer.getSelection()
     if (sel) {
       const text = sel.getSelectedText()
-      if (text) {
-        renderer.copyToClipboardOSC52(text)
-        const prev = input.placeholder
-        input.placeholder = "Copied!"
-        setTimeout(() => { input.placeholder = prev }, 1500)
-      }
+      if (text) renderer.copyToClipboardOSC52(text)
     }
     return
   }
@@ -674,7 +714,10 @@ renderer.root.add(
 // ── Health polling ────────────────────────────────────────
 const healthTimer = setInterval(checkHealth, 3000)
 function cancelHealth() { clearInterval(healthTimer) }
-process.on('SIGINT', cancelHealth)
-process.on('SIGTERM', cancelHealth)
+process.on('SIGINT', () => { log('SIGINT'); cancelHealth() })
+process.on('SIGTERM', () => { log('SIGTERM'); cancelHealth() })
+// opentui's exitOnCtrlC destroys text buffers before the 'exit' event,
+// so also guard the health check above with try-catch.
 updateBoxTitle()
 updateTabs()
+log('APP READY')
