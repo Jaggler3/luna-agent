@@ -30,6 +30,8 @@ const conn = connect({
 let isBusy = false
 let conversationLines: string[] = []
 let activityLines: string[] = []
+let currentAgentContent = ''
+let agentLineIndex = -1
 
 const conversationText = new TextRenderable(renderer, {
   id: 'conversation-content',
@@ -126,6 +128,11 @@ async function sendMessage(text: string) {
     return
   }
 
+  currentAgentContent = ''
+  agentLineIndex = conversationLines.length
+  conversationLines.push('agent: ')
+  updateConversation()
+
   conn.send(text)
 
   const timeout = setTimeout(() => {
@@ -137,24 +144,41 @@ async function sendMessage(text: string) {
 
   try {
     for await (const msg of conn.receive()) {
-      if (msg.type === 'tool_call') {
-        const name = msg.name as string
-        const args = msg.args as string
-        let label = name
-        try {
-          const parsed = JSON.parse(args)
-          label = `${name} ${Object.values(parsed).join(' ')}`
-        } catch {}
-        activityLines.push(`→ ${label}`)
-        updateActivity()
-      } else if (msg.response) {
-        conversationLines.push(msg.response as string)
-        updateConversation()
-        break
-      } else if (msg.error) {
-        conversationLines.push(`error: ${msg.error}`)
-        updateConversation()
-        break
+      switch (msg.type) {
+        case 'token': {
+          currentAgentContent += msg.content as string
+          conversationLines[agentLineIndex] = `agent: ${currentAgentContent}`
+          updateConversation()
+          break
+        }
+        case 'reasoning': {
+          const chunk = msg.content as string
+          if (activityLines.length === 0 || !activityLines[activityLines.length - 1].startsWith('  reasoning:')) {
+            activityLines.push(`  reasoning: ${chunk}`)
+          } else {
+            activityLines[activityLines.length - 1] += chunk
+          }
+          updateActivity()
+          break
+        }
+        case 'tool_call': {
+          const name = msg.name as string
+          const args = msg.args as string
+          let label = name
+          try {
+            const parsed = JSON.parse(args)
+            label = `${name} ${Object.values(parsed).join(' ')}`
+          } catch {}
+          activityLines.push(`→ ${label}`)
+          updateActivity()
+          break
+        }
+        case 'done':
+          return
+        case 'error':
+          conversationLines.push(`error: ${msg.error as string}`)
+          updateConversation()
+          return
       }
     }
   } catch (err) {

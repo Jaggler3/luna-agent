@@ -4,11 +4,12 @@ import { createServer } from 'luna-gateway'
 const server = createServer({
   agentId: process.env.AGENT_ID ?? 'agent',
   handler: async (prompt, emit) => {
-    return simpleRun(prompt, {
-      onToolCall: (name, args) => {
-        emit({ type: 'tool_call', name, args })
-      },
+    await simpleRun(prompt, {
+      onToolCall: (name, args) => emit({ type: 'tool_call', name, args }),
+      onToken: (token) => emit({ type: 'token', content: token }),
+      onReasoning: (chunk) => emit({ type: 'reasoning', content: chunk }),
     })
+    emit({ type: 'done' })
   },
 })
 

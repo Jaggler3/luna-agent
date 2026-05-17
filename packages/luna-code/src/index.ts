@@ -134,7 +134,15 @@ Rules:
 Available tools:
 ${TOOLS.map((t) => `  - ${t.function.name}: ${t.function.description}`).join('\n')}`
 
-async function callOllama(messages: Msg[]): Promise<Msg> {
+interface StreamCallbacks {
+  onToken?: (t: string) => void
+  onReasoning?: (t: string) => void
+}
+
+async function callOllamaStream(
+  messages: Msg[],
+  callbacks?: StreamCallbacks
+): Promise<{ content: string; toolCalls?: ToolCall[] }> {
   const res = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -142,6 +150,7 @@ async function callOllama(messages: Msg[]): Promise<Msg> {
       model: MODEL,
       messages,
       tools: TOOLS,
+      stream: true,
     }),
   })
 
@@ -150,8 +159,66 @@ async function callOllama(messages: Msg[]): Promise<Msg> {
     throw new Error(`ollama error (${res.status}): ${text}`)
   }
 
-  const data = await res.json() as { choices: { message: Msg }[] }
-  return data.choices[0].message
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  const toolCallsMap = new Map<number, ToolCall>()
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed || !trimmed.startsWith('data: ')) continue
+      const data = trimmed.slice(6)
+      if (data === '[DONE]') continue
+
+      try {
+        const parsed = JSON.parse(data)
+        const choice = parsed.choices?.[0]
+        if (!choice) continue
+
+        const delta = choice.delta
+        if (!delta) continue
+
+        if (delta.reasoning) {
+          callbacks?.onReasoning?.(delta.reasoning)
+        }
+        if (delta.content) {
+          content += delta.content
+          callbacks?.onToken?.(delta.content)
+        }
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const index = tc.index ?? 0
+            if (!toolCallsMap.has(index)) {
+              toolCallsMap.set(index, {
+                id: tc.id || `call_${index}`,
+                type: 'function',
+                function: { name: '', arguments: '' },
+              })
+            }
+            const existing = toolCallsMap.get(index)!
+            if (tc.function?.name) existing.function.name += tc.function.name
+            if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
+            if (tc.id) existing.id = tc.id
+          }
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  }
+
+  const toolCalls = toolCallsMap.size > 0 ? Array.from(toolCallsMap.values()) : undefined
+  return { content, toolCalls }
 }
 
 function resolvePath(p: string): string {
@@ -238,9 +305,11 @@ async function executeTool(tc: ToolCall): Promise<string> {
 
 export interface SimpleRunCallbacks {
   onToolCall?: (name: string, args: string) => void
+  onToken?: (token: string) => void
+  onReasoning?: (chunk: string) => void
 }
 
-export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks): Promise<string> {
+export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks): Promise<void> {
   const messages: Msg[] = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: prompt },
@@ -249,20 +318,23 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
   const maxIterations = 25
 
   for (let i = 0; i < maxIterations; i++) {
-    const msg = await callOllama(messages)
+    const { content, toolCalls } = await callOllamaStream(messages, {
+      onToken: callbacks?.onToken,
+      onReasoning: callbacks?.onReasoning,
+    })
 
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      messages.push(msg)
-      for (const tc of msg.tool_calls) {
-        callbacks?.onToolCall(tc.function.name, tc.function.arguments)
+    if (toolCalls && toolCalls.length > 0) {
+      const assistantMsg: Msg = { role: 'assistant', content, tool_calls: toolCalls }
+      messages.push(assistantMsg)
+
+      for (const tc of toolCalls) {
+        callbacks?.onToolCall?.(tc.function.name, tc.function.arguments)
         const result = await executeTool(tc)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
       }
       continue
     }
 
-    return msg.content || '(no response)'
+    return
   }
-
-  return 'exceeded max iterations'
 }

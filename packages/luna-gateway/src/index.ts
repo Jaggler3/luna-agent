@@ -6,7 +6,7 @@ export type GatewayMessage = Record<string, unknown>
 
 export interface ServerOptions {
   agentId: string
-  handler: (prompt: string, emit: (msg: GatewayMessage) => void) => Promise<string>
+  handler: (prompt: string, emit: (msg: GatewayMessage) => void) => Promise<void>
 }
 
 export function createServer(options: ServerOptions) {
@@ -21,10 +21,9 @@ export function createServer(options: ServerOptions) {
     for await (const line of rl) {
       try {
         const { message } = JSON.parse(line)
-        const response = await handler(message, emit)
-        process.stdout.write(JSON.stringify({ response }) + '\n')
+        await handler(message, emit)
       } catch (err) {
-        process.stdout.write(JSON.stringify({ error: String(err) }) + '\n')
+        process.stdout.write(JSON.stringify({ type: 'error', error: String(err) }) + '\n')
       }
     }
   }
@@ -68,7 +67,7 @@ export function connect(options: ConnectionOptions): Connection {
       try {
         yield JSON.parse(line)
       } catch {
-        yield { response: line }
+        yield { type: 'error', error: line }
       }
     }
   }
