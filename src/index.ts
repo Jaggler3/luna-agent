@@ -12,7 +12,7 @@ function log(...args: unknown[]) {
   try {
     const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`
     appendFileSync(LOG_FILE, line + '\n')
-  } catch {}
+  } catch { }
 }
 
 log('APP START')
@@ -32,7 +32,7 @@ class BrailleBreathe {
     }
     return line
   }
-  free() {}
+  free() { }
 }
 
 const cwdIndex = process.argv.indexOf('--cwd')
@@ -93,11 +93,10 @@ interface AgentData {
   id: string
   meta: AgentMeta
   messages: RawMessage[]
-  activity: string[]
   conn: Connection | null
   isRunning: boolean
   isBusy: boolean
-  activityLines: string[]
+  diffLines: string[]
   namingPromise: Promise<void> | null
   animTimer: ReturnType<typeof setInterval> | null
   anim: BrailleBreathe | null
@@ -106,7 +105,9 @@ interface AgentData {
 
 let tabAreaInstance: Renderable | null = null
 let conversationBoxInstance: Renderable | null = null
-let thoughtsToggleInstance: Renderable | null = null
+let activityBoxInstance: Renderable | null = null
+let tabsBoxInstance: Renderable | null = null
+let sidebarCollapsed = false
 
 
 function metaPath(id: string): string { return join(AGENTS_DIR, id, 'meta.json') }
@@ -123,16 +124,16 @@ function saveMeta(id: string, meta: AgentMeta) {
   writeFileSync(metaPath(id), JSON.stringify(meta))
 }
 
-function loadConversation(id: string): { messages: RawMessage[]; activity: string[] } | null {
+function loadConversation(id: string): { messages: RawMessage[] } | null {
   try {
     const data = JSON.parse(readFileSync(conversationPath(id), 'utf-8'))
-    return { messages: data.messages ?? [], activity: data.activity ?? [] }
+    return { messages: data.messages ?? [] }
   } catch { return null }
 }
 
-function saveConversation(id: string, messages: RawMessage[], activity: string[]) {
+function saveConversation(id: string, messages: RawMessage[]) {
   const meta = loadMeta(id)
-  writeFileSync(conversationPath(id), JSON.stringify({ name: meta?.name ?? 'agent', messages, activity }))
+  writeFileSync(conversationPath(id), JSON.stringify({ name: meta?.name ?? 'agent', messages }))
 }
 
 function isPidRunning(pid: number): boolean {
@@ -161,26 +162,22 @@ const markdownConversation = new MarkdownRenderable(renderer, {
   content: '',
 })
 
-const thoughtsToggle = new TextRenderable(renderer, {
-  id: 'thoughts-toggle',
+const activityText = new TextRenderable(renderer, {
+  id: 'activity-content',
+  fg: theme.fg,
   content: '',
+})
+
+const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 24 })
+
+const collapseBtn = new TextRenderable(renderer, {
+  id: 'collapse-btn',
+  content: new StyledText([fg(theme.comment)(' ▶ ')]),
   selectable: false,
 })
-
-thoughtsToggle.onMouseDown = (ev: { button: number }) => {
-  if (ev.button === 0) {
-    toggleLatestThought()
-  }
+collapseBtn.onMouseDown = (ev: { button: number }) => {
+  if (ev.button === 0) toggleSidebar()
 }
-
-const activityMarkdown = new MarkdownRenderable(renderer, {
-  id: 'activity-content',
-  syntaxStyle,
-  fg: theme.fg,
-  content: '*Agent actions will appear here.*',
-})
-
-const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 20 })
 
 function handleSubmit() {
   const value = input.plainText
@@ -233,13 +230,14 @@ const conversationBox = Box(
     },
     markdownConversation,
   ),
-  thoughtsToggle,
   input,
 ) as unknown as { title: string }
 
 const activityBox = Box(
   {
-    width: 60,
+    id: 'activity-box',
+    visible: false,
+    width: 0,
     borderStyle: "rounded",
     borderColor: theme.border,
     backgroundColor: theme.bg,
@@ -255,18 +253,20 @@ const activityBox = Box(
       stickyStart: "bottom",
       scrollY: true,
     },
-    activityMarkdown,
+    activityText,
   ),
 )
 
 const tabsBox = Box(
   {
-    width: 20,
+    id: 'tabs-box',
+    width: 24,
     flexDirection: "column",
     gap: 1,
-    paddingTop: 2,
+    paddingTop: 1,
     paddingLeft: 1,
   },
+  collapseBtn,
   tabArea,
 )
 
@@ -287,21 +287,6 @@ function updateBoxTitle() {
   } catch (e) { log('updateBoxTitle error', e) }
 }
 
-function updateThoughtsToggle() {
-  try {
-    const btn = (thoughtsToggleInstance ?? thoughtsToggle) as unknown as { content: string | StyledText }
-    const a = activeAgent()
-    if (!a) { btn.content = ''; return }
-    const latestAssistantMsg = [...a.messages].reverse().find(m => m.role === 'assistant' && m.reasoning)
-    if (!latestAssistantMsg) { btn.content = ''; return }
-    if (latestAssistantMsg.thinkingExpanded) {
-      btn.content = new StyledText([fg(theme.purple)(" ▼ Hide Thinking Process [Ctrl+T] ")])
-    } else {
-      btn.content = new StyledText([fg(theme.blue)(" ▶ Show Thinking Process [Ctrl+T] ")])
-    }
-  } catch (e) { log('updateThoughtsToggle error', e) }
-}
-
 function toggleLatestThought(index?: number) {
   try {
     const a = activeAgent()
@@ -310,7 +295,7 @@ function toggleLatestThought(index?: number) {
       const msg = a.messages[index]
       if (msg && msg.role === 'assistant' && msg.reasoning) {
         msg.thinkingExpanded = !msg.thinkingExpanded
-        saveConversation(a.id, a.messages, a.activity)
+        saveConversation(a.id, a.messages)
         updateConversation()
       }
       return
@@ -318,17 +303,30 @@ function toggleLatestThought(index?: number) {
     const latestAssistantMsg = [...a.messages].reverse().find(m => m.role === 'assistant' && m.reasoning)
     if (latestAssistantMsg) {
       latestAssistantMsg.thinkingExpanded = !latestAssistantMsg.thinkingExpanded
-      saveConversation(a.id, a.messages, a.activity)
+      saveConversation(a.id, a.messages)
       updateConversation()
     }
   } catch (e) { log('toggleLatestThought error', e) }
 }
 
+function toggleSidebar() {
+  sidebarCollapsed = !sidebarCollapsed
+  try {
+    const tb = tabsBoxInstance as unknown as { width: number }
+    if (tb) {
+      tb.width = sidebarCollapsed ? 3 : 24
+    }
+    collapseBtn.content = new StyledText([
+      sidebarCollapsed ? fg(theme.blue)(' ◀ ') : fg(theme.comment)(' ▶ ')
+    ])
+  } catch (e) { log('toggleSidebar error', e) }
+}
+
 function updateConversation() {
   try {
     const a = activeAgent()
-    if (!a) { markdownConversation.content = ''; updateThoughtsToggle(); return }
-    if (a.messages.length === 0) { markdownConversation.content = ''; updateThoughtsToggle(); return }
+    if (!a) { markdownConversation.content = ''; return }
+    if (a.messages.length === 0) { markdownConversation.content = ''; return }
     const parts: string[] = []
     for (let i = 0; i < a.messages.length; i++) {
       const msg = a.messages[i]
@@ -359,14 +357,18 @@ function updateConversation() {
       }
     }
     markdownConversation.content = parts.join('')
-    updateThoughtsToggle()
   } catch (e) { log('updateConversation error', e) }
 }
 
 function updateActivity() {
   try {
     const a = activeAgent()
-    activityMarkdown.content = a ? a.activityLines.join('\n') : '*Agent actions will appear here.*'
+    const hasDiffs = a ? a.diffLines.length > 0 : false
+    if (activityBoxInstance) {
+      (activityBoxInstance as unknown as { visible: boolean; width: number }).visible = hasDiffs;
+      (activityBoxInstance as unknown as { visible: boolean; width: number }).width = hasDiffs ? 35 : 0
+    }
+    activityText.content = (hasDiffs && a) ? a.diffLines.join('\n') : ''
   } catch (e) { log('updateActivity error', e) }
 }
 
@@ -383,7 +385,7 @@ function updateTabs() {
       if (!a) continue
       const isActive = id === activeId
       const dotChar = a.isRunning ? '●' : '○'
-      const label = ` ${dotChar} ${a.meta.name.padEnd(11).slice(0, 11)} `
+      const label = ` ${dotChar} ${a.meta.name.padEnd(15).slice(0, 15)} `
       const chunks: TextChunk[] = isActive
         ? [bg(theme.bgHighlight)(fg(theme.blue)(label))]
         : [fg(theme.comment)(label)]
@@ -394,7 +396,7 @@ function updateTabs() {
     if (ids.length > 0) {
       ta.add(new TextRenderable(renderer, {
         id: 'tab-sep',
-        content: new StyledText([fg(theme.comment)(`${'─'.repeat(17)}`)]),
+        content: new StyledText([fg(theme.comment)(`${'─'.repeat(21)}`)]),
         selectable: false,
       }))
     }
@@ -412,7 +414,7 @@ function handleSlashCommand(value: string): boolean {
       ...(a?.messages.map(m => `${m.role}: ${m.content}${m.reasoning ? `\nreasoning: ${m.reasoning}` : ''}`) ?? []),
       '',
       '=== Activity ===',
-      ...(a?.activityLines ?? []),
+      ...(a?.diffLines ?? []),
     ]
     execSync('pbcopy', { input: lines.join('\n') })
     const prev = input.placeholder
@@ -448,7 +450,7 @@ function checkHealth() {
           if (a.anim) a.anim.free()
           if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
           if (a.conn) {
-            try { a.conn.kill() } catch {}
+            try { a.conn.kill() } catch { }
           }
         }
       } else {
@@ -467,7 +469,7 @@ function waitForSocketFile(sockPath: string, timeout: number): Promise<void> {
     function poll() {
       try {
         if (existsSync(sockPath)) { resolve(); return }
-      } catch {}
+      } catch { }
       if (Date.now() - start > timeout) {
         reject(new Error('Agent socket did not appear'))
       } else {
@@ -486,7 +488,7 @@ async function startAgent(id: string): Promise<Connection | null> {
   mkdirSync(agentDir, { recursive: true })
 
   const meta = loadMeta(id) ?? { name: 'agent', pid: null, createdAt: new Date().toISOString() }
-  try { unlinkSync(sockPath) } catch {}
+  try { unlinkSync(sockPath) } catch { }
 
   const conn = connect({
     agentId: id,
@@ -519,7 +521,7 @@ async function ensureRunning(a: AgentData): Promise<void> {
   log('ensureRunning begin', a.id, 'conn:', !!a.conn, 'running:', a.isRunning)
   if (a.conn && a.isRunning) { log('ensureRunning already running'); return }
   if (a.conn) {
-    try { a.conn.kill() } catch {}
+    try { a.conn.kill() } catch { }
     a.conn = null
   }
   a.conn = await startAgent(a.id).catch((e) => { log('startAgent failed', e); return null })
@@ -527,7 +529,7 @@ async function ensureRunning(a: AgentData): Promise<void> {
   log('ensureRunning done, running:', a.isRunning)
   if (!a.conn) {
     a.messages.push({ role: 'system', content: 'failed to start agent', error: true })
-    saveConversation(a.id, a.messages, a.activity)
+    saveConversation(a.id, a.messages)
     updateConversation()
   }
   updateBoxTitle()
@@ -564,7 +566,7 @@ async function sendMessage(text: string) {
   await ensureRunning(a)
   if (!a.conn) {
     a.messages.push({ role: 'system', content: 'agent not available', error: true })
-    saveConversation(a.id, a.messages, a.activity)
+    saveConversation(a.id, a.messages)
     updateConversation()
     a.isBusy = false
     input.focus()
@@ -573,7 +575,7 @@ async function sendMessage(text: string) {
   log('sendMessage connection ready')
 
   a.messages.push({ role: 'user', content: text })
-  saveConversation(a.id, a.messages, a.activity)
+  saveConversation(a.id, a.messages)
   updateConversation()
 
   // Include conversation history so the agent knows what "it" refers to
@@ -615,7 +617,7 @@ async function sendMessage(text: string) {
     anim.free()
     markdownConversation.streaming = false
     a.messages.push({ role: 'system', content: 'timed out waiting for agent', error: true })
-    saveConversation(a.id, a.messages, a.activity)
+    saveConversation(a.id, a.messages)
     updateConversation()
     a.isBusy = false
     input.focus()
@@ -650,36 +652,21 @@ async function sendMessage(text: string) {
           }
           if (!markdownConversation.streaming) markdownConversation.streaming = true
           agentMsg.reasoning += msg.content as string
-          if (a.activityLines.length === 0 || a.activityLines[a.activityLines.length - 1] !== '*Thinking...*') {
-            a.activityLines.push('*Thinking...*')
-          }
-          updateActivity()
           updateConversation()
           break
         }
         case 'tool_call': {
           const name = msg.name as string
-          const args = msg.args as string
           const diff = msg.diff as string | undefined
-          if (diff) {
-            let path = ''
-            try {
-              const parsed = JSON.parse(args)
-              path = parsed.path || ''
-            } catch {}
-            const pathLabel = path ? ` \`${path}\`` : ''
-            a.activityLines.push(`* **${name}**${pathLabel}\n\`\`\`diff\n${diff}\n\`\`\``)
-            a.activity.push(`* **${name}**${pathLabel}\n\`\`\`diff\n${diff}\n\`\`\``)
-          } else {
-            let label = name
-            try {
-              const parsed = JSON.parse(args)
-              label = `${name} ${Object.values(parsed).join(' ')}`
-            } catch {}
-            a.activityLines.push(`* **${name}** ${label}`)
-            a.activity.push(`* **${name}** ${label}`)
+          const args = msg.args as string
+          let parsed: any = {}
+          try { parsed = JSON.parse(args) } catch { }
+
+          if ((name === 'write_file' || name === 'edit_file') && diff) {
+            const path = parsed.path || ''
+            a.diffLines.push(`✎ ${path}\n---\n${diff}`)
+            updateActivity()
           }
-          updateActivity()
           break
         }
         case 'done':
@@ -688,7 +675,7 @@ async function sendMessage(text: string) {
           anim.free()
           markdownConversation.streaming = false
           agentMsg.thinkingExpanded = false
-          saveConversation(a.id, a.messages, a.activity)
+          saveConversation(a.id, a.messages)
           updateConversation()
           return
         case 'error':
@@ -697,7 +684,7 @@ async function sendMessage(text: string) {
           anim.free()
           markdownConversation.streaming = false
           a.messages.push({ role: 'system', content: msg.error as string, error: true })
-          saveConversation(a.id, a.messages, a.activity)
+          saveConversation(a.id, a.messages)
           updateConversation()
           return
       }
@@ -705,13 +692,13 @@ async function sendMessage(text: string) {
     // receive loop ended without done/error — show error
     markdownConversation.streaming = false
     a.messages.push({ role: 'system', content: 'connection to agent lost', error: true })
-    saveConversation(a.id, a.messages, a.activity)
+    saveConversation(a.id, a.messages)
     updateConversation()
   } catch (err) {
     log('sendMessage exception:', err)
     markdownConversation.streaming = false
     a.messages.push({ role: 'system', content: String(err), error: true })
-    saveConversation(a.id, a.messages, a.activity)
+    saveConversation(a.id, a.messages)
     updateConversation()
   } finally {
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
@@ -743,9 +730,9 @@ function createNewAgent() {
   saveMeta(id, meta)
   const data: AgentData = {
     id, meta,
-    messages: [], activity: [],
+    messages: [],
     conn: null, isRunning: false, isBusy: false,
-    activityLines: [],
+    diffLines: [],
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }
   agents.set(id, data)
@@ -763,7 +750,7 @@ function closeCurrentAgent() {
   if (a.conn) { try { a.conn.kill() } catch (e) { log('close conn err', e) }; a.conn = null }
   if (a.meta.pid) { try { process.kill(a.meta.pid) } catch (e) { log('close pid err', e) } }
   const sockPath = socketPath(a.id)
-  try { unlinkSync(sockPath) } catch {}
+  try { unlinkSync(sockPath) } catch { }
   agents.delete(a.id)
   const dir = join(AGENTS_DIR, a.id)
   try { rmSync(dir, { recursive: true, force: true }) } catch (e) { log('close rm err', e) }
@@ -795,22 +782,21 @@ for (const id of existing) {
   if (!meta) continue
   const conv = loadConversation(id)
   const messages = conv?.messages ?? []
-  const activity = conv?.activity ?? []
 
   let isRunning = false
   let conn: Connection | null = null
   // Kill old agent processes on restart so they pick up latest luna-code changes
   if (meta.pid && isPidRunning(meta.pid)) {
     log('killing stale agent', id, 'pid:', meta.pid)
-    try { process.kill(meta.pid) } catch {}
-    try { unlinkSync(socketPath(id)) } catch {}
+    try { process.kill(meta.pid) } catch { }
+    try { unlinkSync(socketPath(id)) } catch { }
     meta.pid = null
     saveMeta(id, meta)
   }
 
   const data: AgentData = {
-    id, meta, messages, activity, conn, isRunning, isBusy: false,
-    activityLines: [...activity],
+    id, meta, messages, conn, isRunning, isBusy: false,
+    diffLines: [],
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }
   agents.set(id, data)
@@ -855,6 +841,11 @@ renderer.keyInput.on("keypress", (event) => {
     closeCurrentAgent()
     return
   }
+  if (event.ctrl && event.name === "b") {
+    event.preventDefault()
+    toggleSidebar()
+    return
+  }
   if (event.ctrl && event.name === "t") {
     event.preventDefault()
     toggleLatestThought()
@@ -892,10 +883,12 @@ renderer.root.add(
 // calls instead of executing them, so we need the real instance at runtime)
 const foundTabArea = renderer.root.findDescendantById('tab-area')
 if (foundTabArea) tabAreaInstance = foundTabArea
+const foundTabsBox = renderer.root.findDescendantById('tabs-box')
+if (foundTabsBox) tabsBoxInstance = foundTabsBox
 const foundConvBox = renderer.root.findDescendantById('conversation-box')
 if (foundConvBox) conversationBoxInstance = foundConvBox
-const foundThoughtsToggle = renderer.root.findDescendantById('thoughts-toggle')
-if (foundThoughtsToggle) thoughtsToggleInstance = foundThoughtsToggle
+const foundActivityBox = renderer.root.findDescendantById('activity-box')
+if (foundActivityBox) activityBoxInstance = foundActivityBox
 
 // ── Health polling ────────────────────────────────────────
 const healthTimer = setInterval(checkHealth, 3000)

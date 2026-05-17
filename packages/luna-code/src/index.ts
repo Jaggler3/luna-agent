@@ -168,6 +168,7 @@ function buildSystemPrompt(): string {
     `- Be decisive. If the user says "implement it" and you just suggested a feature, implement it without asking for clarification.`,
     `- Never include internal deliberation, uncertainty, or "maybe" style reasoning in your responses. If you are unsure, ask a brief (1-2 sentence) clarifying question.`,
     `- Be concise. Keep responses short and to the point. Avoid lengthy explanations unless asked.`,
+    `- Use concise bullet-point lists instead of tables when presenting structured information. Tables are hard to read in a terminal.`,
     ``,
     `## Available tools`,
     `${TOOLS.map((t) => `  - ${t.function.name}: ${t.function.description}`).join('\n')}`,
