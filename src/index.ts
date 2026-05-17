@@ -237,13 +237,10 @@ function activeAgent(): AgentData | null {
 function updateBoxTitle() {
   try {
     const a = activeAgent()
-    if (!a) {
-      conversationBox.title = 'Conversation'
-      return
-    }
+    if (!a) { conversationBox.title = 'Conversation'; return }
     const dot = a.isRunning ? ' ●' : ' ○'
     const pid = a.meta.pid && a.isRunning ? ` (PID ${a.meta.pid})` : ''
-    conversationBox.title = `${a.meta.name}${pid}`
+    conversationBox.title = `${a.meta.name}${pid}${dot}`
   } catch (e) { log('updateBoxTitle error', e) }
 }
 
@@ -286,11 +283,11 @@ function updateTabs() {
       if (!a) continue
       if (chunks.length > 0) chunks.push({ __isChunk: true, text: '\n' })
       const isActive = id === activeId
-      const dot = a.isRunning ? fg(theme.green)('●') : fg(theme.comment)('○')
+      const dotChar = a.isRunning ? '●' : '○'
       if (isActive) {
-        chunks.push(bg(theme.bgHighlight)(` ${dot} ${fg(theme.blue)(a.meta.name.padEnd(11).slice(0, 11))} `))
+        chunks.push(bg(theme.bgHighlight)(fg(theme.blue)(` ${dotChar} ${a.meta.name.padEnd(11).slice(0, 11)} `)))
       } else {
-        chunks.push(fg(theme.comment)(` ${dot} ${a.meta.name.padEnd(11).slice(0, 11)} `))
+        chunks.push(fg(theme.comment)(` ${dotChar} ${a.meta.name.padEnd(11).slice(0, 11)} `))
       }
     }
     if (chunks.length > 0) {
