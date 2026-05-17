@@ -9,7 +9,7 @@ const server = createServer({
   socketPath: process.env.LUNA_SOCKET_PATH,
   handler: async (prompt, emit) => {
     await simpleRun(prompt, {
-      onToolCall: (name, args) => emit({ type: 'tool_call', name, args }),
+      onToolCall: (name, args, diff) => emit({ type: 'tool_call', name, args, diff }),
       onToken: (token) => emit({ type: 'token', content: token }),
       onReasoning: (chunk) => emit({ type: 'reasoning', content: chunk }),
     })

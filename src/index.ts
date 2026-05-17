@@ -76,8 +76,11 @@ const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 mkdirSync(AGENTS_DIR, { recursive: true })
 
 interface RawMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string
+  reasoning?: string
+  thinkingExpanded?: boolean
+  error?: boolean
 }
 
 interface AgentMeta {
@@ -94,15 +97,17 @@ interface AgentData {
   conn: Connection | null
   isRunning: boolean
   isBusy: boolean
-  conversationLines: string[]
   activityLines: string[]
-  currentAgentContent: string
-  agentLineIndex: number
   namingPromise: Promise<void> | null
   animTimer: ReturnType<typeof setInterval> | null
   anim: BrailleBreathe | null
   timeout: ReturnType<typeof setTimeout> | null
 }
+
+let tabAreaInstance: Renderable | null = null
+let conversationBoxInstance: Renderable | null = null
+let thoughtsToggleInstance: Renderable | null = null
+
 
 function metaPath(id: string): string { return join(AGENTS_DIR, id, 'meta.json') }
 function conversationPath(id: string): string { return join(AGENTS_DIR, id, 'conversation.jsonl') }
@@ -147,8 +152,6 @@ function scanAgents(): string[] {
 
 const agents = new Map<string, AgentData>()
 let activeId: string | null = null
-let tabAreaInstance: Renderable | null = null
-let conversationBoxInstance: Renderable | null = null
 
 // ── UI components ─────────────────────────────────────────
 const markdownConversation = new MarkdownRenderable(renderer, {
@@ -158,14 +161,26 @@ const markdownConversation = new MarkdownRenderable(renderer, {
   content: '',
 })
 
-const activityText = new TextRenderable(renderer, {
-  id: 'activity-content',
-  content: t`${fg(theme.comment)("Agent actions will appear here.")}`,
+const thoughtsToggle = new TextRenderable(renderer, {
+  id: 'thoughts-toggle',
+  content: '',
+  selectable: false,
 })
 
-const activityArea = Box({ flexGrow: 1, gap: 1 })
+thoughtsToggle.onMouseDown = (ev: { button: number }) => {
+  if (ev.button === 0) {
+    toggleLatestThought()
+  }
+}
+
+const activityMarkdown = new MarkdownRenderable(renderer, {
+  id: 'activity-content',
+  syntaxStyle,
+  fg: theme.fg,
+  content: '*Agent actions will appear here.*',
+})
+
 const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 20 })
-activityArea.add(activityText)
 
 function handleSubmit() {
   const value = input.plainText
@@ -218,12 +233,13 @@ const conversationBox = Box(
     },
     markdownConversation,
   ),
+  thoughtsToggle,
   input,
 ) as unknown as { title: string }
 
 const activityBox = Box(
   {
-    width: 28,
+    width: 60,
     borderStyle: "rounded",
     borderColor: theme.border,
     backgroundColor: theme.bg,
@@ -232,7 +248,15 @@ const activityBox = Box(
     padding: 1,
     gap: 1,
   },
-  activityArea,
+  ScrollBox(
+    {
+      flexGrow: 1,
+      stickyScroll: true,
+      stickyStart: "bottom",
+      scrollY: true,
+    },
+    activityMarkdown,
+  ),
 )
 
 const tabsBox = Box(
@@ -263,33 +287,86 @@ function updateBoxTitle() {
   } catch (e) { log('updateBoxTitle error', e) }
 }
 
+function updateThoughtsToggle() {
+  try {
+    const btn = (thoughtsToggleInstance ?? thoughtsToggle) as unknown as { content: string | StyledText }
+    const a = activeAgent()
+    if (!a) { btn.content = ''; return }
+    const latestAssistantMsg = [...a.messages].reverse().find(m => m.role === 'assistant' && m.reasoning)
+    if (!latestAssistantMsg) { btn.content = ''; return }
+    if (latestAssistantMsg.thinkingExpanded) {
+      btn.content = new StyledText([fg(theme.purple)(" ▼ Hide Thinking Process [Ctrl+T] ")])
+    } else {
+      btn.content = new StyledText([fg(theme.blue)(" ▶ Show Thinking Process [Ctrl+T] ")])
+    }
+  } catch (e) { log('updateThoughtsToggle error', e) }
+}
+
+function toggleLatestThought(index?: number) {
+  try {
+    const a = activeAgent()
+    if (!a) return
+    if (typeof index === 'number') {
+      const msg = a.messages[index]
+      if (msg && msg.role === 'assistant' && msg.reasoning) {
+        msg.thinkingExpanded = !msg.thinkingExpanded
+        saveConversation(a.id, a.messages, a.activity)
+        updateConversation()
+      }
+      return
+    }
+    const latestAssistantMsg = [...a.messages].reverse().find(m => m.role === 'assistant' && m.reasoning)
+    if (latestAssistantMsg) {
+      latestAssistantMsg.thinkingExpanded = !latestAssistantMsg.thinkingExpanded
+      saveConversation(a.id, a.messages, a.activity)
+      updateConversation()
+    }
+  } catch (e) { log('toggleLatestThought error', e) }
+}
+
 function updateConversation() {
   try {
     const a = activeAgent()
-    if (!a) { markdownConversation.content = ''; return }
-    if (a.conversationLines.length === 0) { markdownConversation.content = ''; return }
+    if (!a) { markdownConversation.content = ''; updateThoughtsToggle(); return }
+    if (a.messages.length === 0) { markdownConversation.content = ''; updateThoughtsToggle(); return }
     const parts: string[] = []
-    for (let i = 0; i < a.conversationLines.length; i++) {
+    for (let i = 0; i < a.messages.length; i++) {
+      const msg = a.messages[i]
       if (parts.length > 0) parts.push('\n\n')
-      const line = a.conversationLines[i]
-      if (line.startsWith('you: ')) {
-        parts.push(`> ${line.slice(5).replace(/\n/g, '\n> ')}`)
-      } else if (line.startsWith('agent: ')) {
-        const text = line.slice(7)
-        if (!text) continue
-        parts.push(text)
-      } else {
-        parts.push(line)
+      if (msg.role === 'user') {
+        parts.push(`> ${msg.content.replace(/\n/g, '\n> ')}`)
+      } else if (msg.role === 'assistant') {
+        const messageParts: string[] = []
+        if (msg.reasoning && msg.reasoning.trim()) {
+          const isStreaming = a.isBusy && (i === a.messages.length - 1)
+          if (isStreaming || msg.thinkingExpanded) {
+            messageParts.push(`> [!NOTE]\n> **Thinking Process:**\n> ${msg.reasoning.trim().replace(/\n/g, '\n> ')}`)
+          } else {
+            messageParts.push(`> **[Thinking Process collapsed. Press Ctrl+T or click button below to expand]**`)
+          }
+        }
+        if (msg.content) {
+          if (messageParts.length > 0) messageParts.push('\n\n')
+          messageParts.push(msg.content)
+        }
+        parts.push(messageParts.join(''))
+      } else if (msg.role === 'system') {
+        if (msg.error) {
+          parts.push(`*error: ${msg.content}*`)
+        } else {
+          parts.push(`*system: ${msg.content}*`)
+        }
       }
     }
     markdownConversation.content = parts.join('')
+    updateThoughtsToggle()
   } catch (e) { log('updateConversation error', e) }
 }
 
 function updateActivity() {
   try {
     const a = activeAgent()
-    activityText.content = a ? a.activityLines.join('\n') : ''
+    activityMarkdown.content = a ? a.activityLines.join('\n') : '*Agent actions will appear here.*'
   } catch (e) { log('updateActivity error', e) }
 }
 
@@ -332,7 +409,7 @@ function handleSlashCommand(value: string): boolean {
     const a = activeAgent()
     const lines = [
       '=== Conversation ===',
-      ...(a?.conversationLines ?? []),
+      ...(a?.messages.map(m => `${m.role}: ${m.content}${m.reasoning ? `\nreasoning: ${m.reasoning}` : ''}`) ?? []),
       '',
       '=== Activity ===',
       ...(a?.activityLines ?? []),
@@ -341,6 +418,18 @@ function handleSlashCommand(value: string): boolean {
     const prev = input.placeholder
     input.placeholder = "Copied!"
     setTimeout(() => { input.placeholder = prev }, 1500)
+    return true
+  }
+  if (value === '/thought' || value === '/t') {
+    toggleLatestThought()
+    return true
+  }
+  if (value.startsWith('/thought ') || value.startsWith('/t ')) {
+    const parts = value.split(' ')
+    const idx = parseInt(parts[1], 10)
+    if (!isNaN(idx)) {
+      toggleLatestThought(idx)
+    }
     return true
   }
   return false
@@ -437,7 +526,8 @@ async function ensureRunning(a: AgentData): Promise<void> {
   a.isRunning = a.conn !== null
   log('ensureRunning done, running:', a.isRunning)
   if (!a.conn) {
-    a.conversationLines.push('error: failed to start agent')
+    a.messages.push({ role: 'system', content: 'failed to start agent', error: true })
+    saveConversation(a.id, a.messages, a.activity)
     updateConversation()
   }
   updateBoxTitle()
@@ -473,7 +563,8 @@ async function sendMessage(text: string) {
 
   await ensureRunning(a)
   if (!a.conn) {
-    a.conversationLines.push('error: agent not available')
+    a.messages.push({ role: 'system', content: 'agent not available', error: true })
+    saveConversation(a.id, a.messages, a.activity)
     updateConversation()
     a.isBusy = false
     input.focus()
@@ -481,10 +572,9 @@ async function sendMessage(text: string) {
   }
   log('sendMessage connection ready')
 
-  a.conversationLines.push(`you: ${text}`)
-  updateConversation()
   a.messages.push({ role: 'user', content: text })
   saveConversation(a.id, a.messages, a.activity)
+  updateConversation()
 
   // Include conversation history so the agent knows what "it" refers to
   const historyMessages = a.messages.slice(-10)
@@ -503,9 +593,8 @@ async function sendMessage(text: string) {
     })
   }
 
-  a.currentAgentContent = ''
-  a.agentLineIndex = a.conversationLines.length
-  a.conversationLines.push('agent: ')
+  const agentMsg: RawMessage = { role: 'assistant', content: '', reasoning: '', thinkingExpanded: true }
+  a.messages.push(agentMsg)
   updateConversation()
 
   a.conn.send(contextPrompt)
@@ -514,8 +603,10 @@ async function sendMessage(text: string) {
   const anim = new BrailleBreathe()
   a.anim = anim
   a.animTimer = setInterval(() => {
-    a.conversationLines[a.agentLineIndex] = `agent: ${anim.step()}`
-    updateConversation()
+    if (agentMsg) {
+      agentMsg.content = anim.step()
+      updateConversation()
+    }
   }, 80)
 
   a.timeout = setTimeout(() => {
@@ -523,7 +614,8 @@ async function sendMessage(text: string) {
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
     anim.free()
     markdownConversation.streaming = false
-    a.conversationLines.push('timed out waiting for agent')
+    a.messages.push({ role: 'system', content: 'timed out waiting for agent', error: true })
+    saveConversation(a.id, a.messages, a.activity)
     updateConversation()
     a.isBusy = false
     input.focus()
@@ -543,30 +635,50 @@ async function sendMessage(text: string) {
           if (a.animTimer) {
             clearInterval(a.animTimer); a.animTimer = null
             anim.free()
+            agentMsg.content = ''
           }
           if (!markdownConversation.streaming) markdownConversation.streaming = true
-          a.currentAgentContent += msg.content as string
-          a.conversationLines[a.agentLineIndex] = `agent: ${a.currentAgentContent}`
+          agentMsg.content += msg.content as string
           updateConversation()
           break
         }
         case 'reasoning': {
-          if (a.activityLines.length === 0 || a.activityLines[a.activityLines.length - 1] !== 'Thinking') {
-            a.activityLines.push('Thinking')
+          if (a.animTimer) {
+            clearInterval(a.animTimer); a.animTimer = null
+            anim.free()
+            agentMsg.content = ''
+          }
+          if (!markdownConversation.streaming) markdownConversation.streaming = true
+          agentMsg.reasoning += msg.content as string
+          if (a.activityLines.length === 0 || a.activityLines[a.activityLines.length - 1] !== '*Thinking...*') {
+            a.activityLines.push('*Thinking...*')
           }
           updateActivity()
+          updateConversation()
           break
         }
         case 'tool_call': {
           const name = msg.name as string
           const args = msg.args as string
-          let label = name
-          try {
-            const parsed = JSON.parse(args)
-            label = `${name} ${Object.values(parsed).join(' ')}`
-          } catch {}
-          a.activityLines.push(`→ ${label}`)
-          a.activity.push(`→ ${label}`)
+          const diff = msg.diff as string | undefined
+          if (diff) {
+            let path = ''
+            try {
+              const parsed = JSON.parse(args)
+              path = parsed.path || ''
+            } catch {}
+            const pathLabel = path ? ` \`${path}\`` : ''
+            a.activityLines.push(`* **${name}**${pathLabel}\n\`\`\`diff\n${diff}\n\`\`\``)
+            a.activity.push(`* **${name}**${pathLabel}\n\`\`\`diff\n${diff}\n\`\`\``)
+          } else {
+            let label = name
+            try {
+              const parsed = JSON.parse(args)
+              label = `${name} ${Object.values(parsed).join(' ')}`
+            } catch {}
+            a.activityLines.push(`* **${name}** ${label}`)
+            a.activity.push(`* **${name}** ${label}`)
+          }
           updateActivity()
           break
         }
@@ -575,33 +687,38 @@ async function sendMessage(text: string) {
           if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
           anim.free()
           markdownConversation.streaming = false
-          a.messages.push({ role: 'assistant', content: a.currentAgentContent })
+          agentMsg.thinkingExpanded = false
           saveConversation(a.id, a.messages, a.activity)
+          updateConversation()
           return
         case 'error':
           log('sendMessage agent error:', msg.error)
           if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
           anim.free()
           markdownConversation.streaming = false
-          a.conversationLines.push(`error: ${msg.error as string}`)
+          a.messages.push({ role: 'system', content: msg.error as string, error: true })
+          saveConversation(a.id, a.messages, a.activity)
           updateConversation()
           return
       }
     }
     // receive loop ended without done/error — show error
     markdownConversation.streaming = false
-    a.conversationLines.push('error: connection to agent lost')
+    a.messages.push({ role: 'system', content: 'connection to agent lost', error: true })
+    saveConversation(a.id, a.messages, a.activity)
     updateConversation()
   } catch (err) {
     log('sendMessage exception:', err)
     markdownConversation.streaming = false
-    a.conversationLines.push(`error: ${err}`)
+    a.messages.push({ role: 'system', content: String(err), error: true })
+    saveConversation(a.id, a.messages, a.activity)
     updateConversation()
   } finally {
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
     anim.free()
     if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
     a.isBusy = false
+    updateConversation()
     input.focus()
   }
 }
@@ -628,8 +745,7 @@ function createNewAgent() {
     id, meta,
     messages: [], activity: [],
     conn: null, isRunning: false, isBusy: false,
-    conversationLines: [], activityLines: [],
-    currentAgentContent: '', agentLineIndex: -1,
+    activityLines: [],
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }
   agents.set(id, data)
@@ -692,16 +808,9 @@ for (const id of existing) {
     saveMeta(id, meta)
   }
 
-  const conversationLines: string[] = []
-  for (const msg of messages) {
-    if (msg.role === 'user') conversationLines.push(`you: ${msg.content}`)
-    else conversationLines.push(`agent: ${msg.content}`)
-  }
-
   const data: AgentData = {
     id, meta, messages, activity, conn, isRunning, isBusy: false,
-    conversationLines, activityLines: [...activity],
-    currentAgentContent: '', agentLineIndex: -1,
+    activityLines: [...activity],
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }
   agents.set(id, data)
@@ -746,6 +855,11 @@ renderer.keyInput.on("keypress", (event) => {
     closeCurrentAgent()
     return
   }
+  if (event.ctrl && event.name === "t") {
+    event.preventDefault()
+    toggleLatestThought()
+    return
+  }
   if (
     renderer.currentFocusedRenderable !== input
     && event.name
@@ -780,6 +894,8 @@ const foundTabArea = renderer.root.findDescendantById('tab-area')
 if (foundTabArea) tabAreaInstance = foundTabArea
 const foundConvBox = renderer.root.findDescendantById('conversation-box')
 if (foundConvBox) conversationBoxInstance = foundConvBox
+const foundThoughtsToggle = renderer.root.findDescendantById('thoughts-toggle')
+if (foundThoughtsToggle) thoughtsToggleInstance = foundThoughtsToggle
 
 // ── Health polling ────────────────────────────────────────
 const healthTimer = setInterval(checkHealth, 3000)
