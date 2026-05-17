@@ -1,11 +1,11 @@
-import { createCliRenderer, Box, ScrollBox, TextRenderable, InputRenderable, InputRenderableEvents, StyledText, t, fg, bg, MarkdownRenderable, SyntaxStyle } from "@opentui/core"
-import type { TextChunk } from "@opentui/core"
-import { connect, connectSocket } from 'luna-gateway'
+import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, StyledText, t, fg, bg, MarkdownRenderable, SyntaxStyle } from "@opentui/core"
+import type { TextChunk, Renderable } from "@opentui/core"
+import { connect } from 'luna-gateway'
 import type { Connection } from 'luna-gateway'
 import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, readdirSync, statSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, rmSync } from 'node:fs'
 
 const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
 function log(...args: unknown[]) {
@@ -64,7 +64,7 @@ const syntaxStyle = SyntaxStyle.fromStyles({
   'markup.inline.code': { fg: theme.cyan },
   'markup.code': { fg: theme.cyan },
   'markup.link': { fg: theme.blue, underline: true },
-  'markup.quote': { fg: theme.comment },
+  'markup.quote': { fg: theme.comment, bg: theme.bgHighlight },
   'markup.list': { fg: theme.blue },
   'markup.horizontal_rule': { fg: theme.comment },
 })
@@ -147,6 +147,8 @@ function scanAgents(): string[] {
 
 const agents = new Map<string, AgentData>()
 let activeId: string | null = null
+let tabAreaInstance: Renderable | null = null
+let conversationBoxInstance: Renderable | null = null
 
 // ── UI components ─────────────────────────────────────────
 const markdownConversation = new MarkdownRenderable(renderer, {
@@ -161,28 +163,43 @@ const activityText = new TextRenderable(renderer, {
   content: t`${fg(theme.comment)("Agent actions will appear here.")}`,
 })
 
-const tabText = new TextRenderable(renderer, {
-  id: 'agent-tabs',
-  content: '',
-})
-
 const activityArea = Box({ flexGrow: 1, gap: 1 })
-const tabArea = Box({ flexDirection: 'column', gap: 1, width: 20 })
+const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 20 })
 activityArea.add(activityText)
-tabArea.add(tabText)
 
-const input = new InputRenderable(renderer, {
+function handleSubmit() {
+  const value = input.plainText
+  log('SUBMIT pressed, value length:', value.length)
+  if (value.trim() && !activeAgent()?.isBusy) {
+    input.setText('')
+    if (handleSlashCommand(value.trim())) return
+    sendMessage(value)
+  } else {
+    log('SUBMIT ignored', { trimmed: !!value.trim(), busy: activeAgent()?.isBusy })
+  }
+}
+
+const input = new TextareaRenderable(renderer, {
   id: 'main-input',
   placeholder: "Ask the agent to do something...",
   backgroundColor: theme.bgHighlight,
   focusedBackgroundColor: theme.bgHighlight,
   textColor: theme.fg,
   cursorColor: theme.blue,
+  wrapMode: "word",
+  maxHeight: 5,
+  keyBindings: [
+    { name: "return", action: "submit" },
+    { name: "linefeed", action: "submit" },
+    { name: "return", shift: true, action: "newline" },
+  ],
+  onSubmit: handleSubmit,
 })
 
 // Boxes (created early, added to layout later)
 const conversationBox = Box(
   {
+    id: 'conversation-box',
     flexDirection: "column",
     flexGrow: 1,
     borderStyle: "rounded",
@@ -236,11 +253,13 @@ function activeAgent(): AgentData | null {
 
 function updateBoxTitle() {
   try {
+    const target = (conversationBoxInstance ?? conversationBox) as unknown as { title: string }
     const a = activeAgent()
-    if (!a) { conversationBox.title = 'Conversation'; return }
+    if (!a) { target.title = 'Conversation'; return }
     const dot = a.isRunning ? ' ●' : ' ○'
     const pid = a.meta.pid && a.isRunning ? ` (PID ${a.meta.pid})` : ''
-    conversationBox.title = `${a.meta.name}${pid}${dot}`
+    const cwd = process.env.LUNA_CWD ?? process.cwd()
+    target.title = `${a.meta.name}${pid}${dot}  ${cwd}`
   } catch (e) { log('updateBoxTitle error', e) }
 }
 
@@ -254,7 +273,7 @@ function updateConversation() {
       if (parts.length > 0) parts.push('\n\n')
       const line = a.conversationLines[i]
       if (line.startsWith('you: ')) {
-        parts.push(`> **You:** ${line.slice(5).replace(/\n/g, '\n> ')}`)
+        parts.push(`> ${line.slice(5).replace(/\n/g, '\n> ')}`)
       } else if (line.startsWith('agent: ')) {
         const text = line.slice(7)
         if (!text) continue
@@ -276,27 +295,35 @@ function updateActivity() {
 
 function updateTabs() {
   try {
-    const chunks: TextChunk[] = []
+    const ta = (tabAreaInstance ?? tabArea) as unknown as { add(child: unknown): void; remove(id: string): unknown; getChildren(): { id: string }[] }
+    // remove existing entries (only post-mount — proxy queues calls instead of executing)
+    if (tabAreaInstance) {
+      for (const child of ta.getChildren()) ta.remove(child.id)
+    }
     const ids = scanAgents()
     for (const id of ids) {
       const a = agents.get(id)
       if (!a) continue
-      if (chunks.length > 0) chunks.push({ __isChunk: true, text: '\n' })
       const isActive = id === activeId
       const dotChar = a.isRunning ? '●' : '○'
-      if (isActive) {
-        chunks.push(bg(theme.bgHighlight)(fg(theme.blue)(` ${dotChar} ${a.meta.name.padEnd(11).slice(0, 11)} `)))
-      } else {
-        chunks.push(fg(theme.comment)(` ${dotChar} ${a.meta.name.padEnd(11).slice(0, 11)} `))
-      }
+      const label = ` ${dotChar} ${a.meta.name.padEnd(11).slice(0, 11)} `
+      const chunks: TextChunk[] = isActive
+        ? [bg(theme.bgHighlight)(fg(theme.blue)(label))]
+        : [fg(theme.comment)(label)]
+      const entry = new TextRenderable(renderer, { id: `tab-${id}`, content: new StyledText(chunks), selectable: false })
+      entry.onMouseDown = (ev: { button: number }) => { if (ev.button === 0) switchAgent(id) }
+      ta.add(entry)
     }
-    if (chunks.length > 0) {
-      chunks.push({ __isChunk: true, text: '\n' })
-      chunks.push(fg(theme.comment)(`${'─'.repeat(17)}`))
+    if (ids.length > 0) {
+      ta.add(new TextRenderable(renderer, {
+        id: 'tab-sep',
+        content: new StyledText([fg(theme.comment)(`${'─'.repeat(17)}`)]),
+        selectable: false,
+      }))
     }
-    chunks.push({ __isChunk: true, text: '\n' })
-    chunks.push(fg(theme.green)('  + new agent'))
-    tabText.content = new StyledText(chunks)
+    const newBtn = new TextRenderable(renderer, { id: 'tab-new', content: new StyledText([fg(theme.green)('  + new agent')]), selectable: false })
+    newBtn.onMouseDown = (ev: { button: number }) => { if (ev.button === 0) createNewAgent() }
+    ta.add(newBtn)
   } catch (e) { log('updateTabs error', e) }
 }
 
@@ -459,13 +486,30 @@ async function sendMessage(text: string) {
   a.messages.push({ role: 'user', content: text })
   saveConversation(a.id, a.messages, a.activity)
 
+  // Include conversation history so the agent knows what "it" refers to
+  const historyMessages = a.messages.slice(-10)
+  const contextPrompt = historyMessages.map(m =>
+    m.role === 'user' ? `user: ${m.content}` : `assistant: ${m.content}`
+  ).join('\n\n')
+
+  if (a.meta.name === 'agent' && !a.namingPromise) {
+    a.namingPromise = deriveConversationName(text).then((name) => {
+      if (name) {
+        a.meta.name = name
+        saveMeta(a.id, a.meta)
+        updateBoxTitle()
+        updateTabs()
+      }
+    })
+  }
+
   a.currentAgentContent = ''
   a.agentLineIndex = a.conversationLines.length
   a.conversationLines.push('agent: ')
   updateConversation()
 
-  a.conn.send(text)
-  log('sendMessage sent')
+  a.conn.send(contextPrompt)
+  log('sendMessage sent with context')
 
   const anim = new BrailleBreathe()
   a.anim = anim
@@ -501,16 +545,6 @@ async function sendMessage(text: string) {
             anim.free()
           }
           if (!markdownConversation.streaming) markdownConversation.streaming = true
-          if (a.meta.name === 'agent' && !a.namingPromise) {
-            a.namingPromise = deriveConversationName(text).then((name) => {
-              if (name) {
-                a.meta.name = name
-                saveMeta(a.id, a.meta)
-                updateBoxTitle()
-                updateTabs()
-              }
-            })
-          }
           a.currentAgentContent += msg.content as string
           a.conversationLines[a.agentLineIndex] = `agent: ${a.currentAgentContent}`
           updateConversation()
@@ -603,6 +637,26 @@ function createNewAgent() {
   switchAgent(id)
 }
 
+function closeCurrentAgent() {
+  const a = activeAgent()
+  if (!a) { log('closeCurrentAgent: no active agent'); return }
+  log('closeCurrentAgent', a.id)
+  if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+  if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
+  if (a.anim) { a.anim.free(); a.anim = null }
+  if (a.conn) { try { a.conn.kill() } catch (e) { log('close conn err', e) }; a.conn = null }
+  if (a.meta.pid) { try { process.kill(a.meta.pid) } catch (e) { log('close pid err', e) } }
+  const sockPath = socketPath(a.id)
+  try { unlinkSync(sockPath) } catch {}
+  agents.delete(a.id)
+  const dir = join(AGENTS_DIR, a.id)
+  try { rmSync(dir, { recursive: true, force: true }) } catch (e) { log('close rm err', e) }
+  const remaining = scanAgents()
+  const firstLoaded = remaining.find(id => agents.has(id))
+  if (firstLoaded) switchAgent(firstLoaded)
+  else createNewAgent()
+}
+
 function switchToNextAgent() {
   const ids = scanAgents()
   if (ids.length === 0) return
@@ -629,15 +683,13 @@ for (const id of existing) {
 
   let isRunning = false
   let conn: Connection | null = null
+  // Kill old agent processes on restart so they pick up latest luna-code changes
   if (meta.pid && isPidRunning(meta.pid)) {
-    log('reconnecting to agent', id, 'pid:', meta.pid)
-    isRunning = true
-    conn = await connectSocket(socketPath(id)).catch(() => {
-      log('reconnect failed for', id)
-      isRunning = false
-      return null
-    })
-    if (conn) log('reconnected to', id)
+    log('killing stale agent', id, 'pid:', meta.pid)
+    try { process.kill(meta.pid) } catch {}
+    try { unlinkSync(socketPath(id)) } catch {}
+    meta.pid = null
+    saveMeta(id, meta)
   }
 
   const conversationLines: string[] = []
@@ -668,17 +720,6 @@ if (existing.length === 0) {
 }
 
 // ── Input / keyboard ──────────────────────────────────────
-input.on(InputRenderableEvents.ENTER, (value: string) => {
-  log('ENTER pressed, value length:', value.length)
-  if (value.trim() && !activeAgent()?.isBusy) {
-    input.value = ''
-    if (handleSlashCommand(value.trim())) return
-    sendMessage(value)
-  } else {
-    log('ENTER ignored', { trimmed: !!value.trim(), busy: activeAgent()?.isBusy })
-  }
-})
-
 renderer.keyInput.on("keypress", (event) => {
   if (event.ctrl && event.shift && event.name === "c") {
     event.preventDefault()
@@ -694,6 +735,25 @@ renderer.keyInput.on("keypress", (event) => {
     if (event.shift) switchToPrevAgent()
     else switchToNextAgent()
     return
+  }
+  if (event.ctrl && event.name === "n") {
+    event.preventDefault()
+    createNewAgent()
+    return
+  }
+  if (event.ctrl && event.name === "w") {
+    event.preventDefault()
+    closeCurrentAgent()
+    return
+  }
+  if (
+    renderer.currentFocusedRenderable !== input
+    && event.name
+    && event.name.length === 1
+    && !event.ctrl
+    && !event.meta
+  ) {
+    input.focus()
   }
 })
 
@@ -713,6 +773,13 @@ renderer.root.add(
     tabsBox,
   ),
 )
+
+// Get the real BoxRenderable instance for tabArea (the VNode proxy queues
+// calls instead of executing them, so we need the real instance at runtime)
+const foundTabArea = renderer.root.findDescendantById('tab-area')
+if (foundTabArea) tabAreaInstance = foundTabArea
+const foundConvBox = renderer.root.findDescendantById('conversation-box')
+if (foundConvBox) conversationBoxInstance = foundConvBox
 
 // ── Health polling ────────────────────────────────────────
 const healthTimer = setInterval(checkHealth, 3000)

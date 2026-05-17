@@ -165,6 +165,8 @@ function buildSystemPrompt(): string {
     `- Do NOT keep calling tools indefinitely. Once you have enough information, stop and answer.`,
     `- After making a change, verify it if possible`,
     `- When you are done, provide a brief summary of what you did`,
+    `- Be decisive. If the user says "implement it" and you just suggested a feature, implement it without asking for clarification.`,
+    `- Never include internal deliberation, uncertainty, or "maybe" style reasoning in your responses. If you are unsure, ask a brief (1-2 sentence) clarifying question.`,
     `- Be concise. Keep responses short and to the point. Avoid lengthy explanations unless asked.`,
     ``,
     `## Available tools`,
