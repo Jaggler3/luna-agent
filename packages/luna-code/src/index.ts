@@ -123,16 +123,56 @@ const TOOLS: ToolDef[] = [
   },
 ]
 
-const SYSTEM_PROMPT = `You are luna, a coding agent. You have access to tools that let you read, write, and edit files, run commands, and search code.
+function buildSystemPrompt(): string {
+  const parts: string[] = [
+    `You are luna, a coding agent. You have access to tools that let you read, write, and edit files, run commands, and search code.`,
+    ``,
+    `## Working context`,
+    `Working directory: ${CWD}`,
+  ]
 
-Rules:
-- Use tools to accomplish the user's request
-- When the user describes a problem or asks a question, use your tools to investigate then make changes
-- After making a change, verify it if possible
-- When you are done, provide a summary of what you did
+  try {
+    const entries = readdirSync(CWD)
+    const filtered = entries.filter((e) => !/^(node_modules|\.git|dist|\.next|\.cache|\.DS_Store)$/.test(e))
+    if (filtered.length > 0) {
+      parts.push(`Top-level contents:`)
+      for (const e of filtered) {
+        const full = join(CWD, e)
+        const suffix = statSync(full).isDirectory() ? '/' : ''
+        parts.push(`  ${e}${suffix}`)
+      }
+    }
+    const pkgPath = join(CWD, 'package.json')
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+        const info: string[] = []
+        if (pkg.name) info.push(`name: ${pkg.name}`)
+        if (pkg.scripts) info.push(`scripts: ${Object.keys(pkg.scripts).join(', ')}`)
+        if (pkg.description) info.push(`description: ${pkg.description}`)
+        if (info.length) parts.push(`package.json: ${info.join(' | ')}`)
+      } catch {}
+    }
+  } catch {}
 
-Available tools:
-${TOOLS.map((t) => `  - ${t.function.name}: ${t.function.description}`).join('\n')}`
+  parts.push(
+    ``,
+    `All file paths in tools are relative to the working directory.`,
+    ``,
+    `## Rules`,
+    `- Use tools to investigate and make changes as needed`,
+    `- After receiving tool results, synthesize them into a final response for the user`,
+    `- Do NOT keep calling tools indefinitely. Once you have enough information, stop and answer.`,
+    `- After making a change, verify it if possible`,
+    `- When you are done, provide a brief summary of what you did`,
+    `- Be concise. Keep responses short and to the point. Avoid lengthy explanations unless asked.`,
+    ``,
+    `## Available tools`,
+    `${TOOLS.map((t) => `  - ${t.function.name}: ${t.function.description}`).join('\n')}`,
+  )
+
+  return parts.join('\n')
+}
 
 interface StreamCallbacks {
   onToken?: (t: string) => void
@@ -193,7 +233,11 @@ async function callOllamaStream(
         }
         if (delta.content) {
           content += delta.content
-          callbacks?.onToken?.(delta.content)
+          // Only stream content live if this chunk has no tool_calls
+          // (models often put tool call JSON in both fields)
+          if (!delta.tool_calls) {
+            callbacks?.onToken?.(delta.content)
+          }
         }
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
@@ -311,7 +355,7 @@ export interface SimpleRunCallbacks {
 
 export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks): Promise<void> {
   const messages: Msg[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: buildSystemPrompt() },
     { role: 'user', content: prompt },
   ]
 

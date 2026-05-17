@@ -3,4 +3,5 @@ dist/
 .env
 *.local
 AGENTS.md
+PLANS.md
 _test/
