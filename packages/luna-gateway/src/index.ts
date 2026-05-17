@@ -47,12 +47,16 @@ export function createServer(options: ServerOptions) {
 
     server.listen(socketPath)
 
-    process.on('SIGTERM', () => {
+    function cleanup() {
       for (const s of sockets) s.end()
       server.close()
       try { unlinkSync(socketPath) } catch {}
-      process.exit(0)
-    })
+    }
+
+    process.on('SIGTERM', () => { cleanup(); process.exit(0) })
+    process.on('SIGINT', () => { cleanup(); process.exit(0) })
+    process.on('exit', cleanup)
+    process.on('uncaughtException', (err) => { cleanup(); console.error(err); process.exit(1) })
 
     return { listen: () => new Promise(() => {}) }
   }
