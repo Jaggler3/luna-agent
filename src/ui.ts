@@ -4,6 +4,31 @@ import { theme, syntaxStyle, log } from './config'
 import { agents, activeAgent, activeId, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, scanAgents, saveConversation, storeEmitter } from './store'
 import { sendMessage } from './daemon'
 
+function makeDebouncedUpdate(fn: () => void, delay = 50) {
+  let scheduled = false
+  return function schedule() {
+    if (scheduled) return
+    scheduled = true
+    setTimeout(() => {
+      scheduled = false
+      fn()
+    }, delay)
+  }
+}
+
+const scheduleConversationUpdate = makeDebouncedUpdate(() => {
+  updateConversation()
+})
+
+const scheduleActivityUpdate = makeDebouncedUpdate(() => {
+  updateActivity()
+})
+
+const scheduleStatusUpdate = makeDebouncedUpdate(() => {
+  updateBoxTitle()
+  updateTabs()
+})
+
 export const renderer = await createCliRenderer({ exitOnCtrlC: true })
 
 let tabAreaInstance: Renderable | null = null
@@ -53,6 +78,7 @@ function makeMessageBox(role: 'user' | 'assistant' | 'thoughts' | 'system' | 'er
     fg: theme.fg,
     content,
     streaming: isStreaming,
+    internalBlockMode: 'top-level',
   })
 
   // Label styling per role
@@ -425,34 +451,35 @@ export function updateConversation() {
     }
     const survivingMap = new Map(surviving.map(b => [b.key, b]))
 
-    // Update streaming flag on previous streaming block
-    if (_streamingMd && _streamingMd.streaming) {
-      _streamingMd.streaming = false
-      _streamingMd = null
-    }
-
     // Add / update blocks in order
     const newBlocks: MsgBlock[] = []
+    let nextStreamingMd: MarkdownRenderable | null = null
     for (const desc of desired) {
       const existing = survivingMap.get(desc.key)
       if (existing) {
-        // Update content in place
-        existing.md.content = desc.content
-        if (desc.isStreaming) {
-          existing.md.streaming = true
-          _streamingMd = existing.md
+        if (existing.md.content !== desc.content) {
+          existing.md.content = desc.content
         }
+        if (desc.isStreaming) nextStreamingMd = existing.md
         newBlocks.push(existing)
       } else {
         // Create new block
         const boxId = `block-${desc.key}`
         const mdId = `md-${desc.key}`
         const block = makeMessageBox(desc.role, boxId, mdId, desc.content, desc.isStreaming)
-        if (desc.isStreaming) _streamingMd = block.md
+        if (desc.isStreaming) nextStreamingMd = block.md
         list.add(block.box)
         newBlocks.push(block)
       }
     }
+
+    if (_streamingMd && _streamingMd !== nextStreamingMd && _streamingMd.streaming) {
+      _streamingMd.streaming = false
+    }
+    if (nextStreamingMd && !nextStreamingMd.streaming) {
+      nextStreamingMd.streaming = true
+    }
+    _streamingMd = nextStreamingMd
 
     _msgBlocks = newBlocks
   } catch (e) { log('updateConversation error', e) }
@@ -613,8 +640,7 @@ renderer.keyInput.on("keypress", (event) => {
 
 // ── Observers for Store Events ──────────────────────────────────
 storeEmitter.on('update', () => {
-  updateConversation()
-  updateBoxTitle()
+  scheduleConversationUpdate()
 })
 
 storeEmitter.on('switch', () => {
@@ -623,6 +649,7 @@ storeEmitter.on('switch', () => {
   for (const b of _msgBlocks) list.remove(b.boxId)
   _msgBlocks = []
   if (_streamingMd) { _streamingMd.streaming = false; _streamingMd = null }
+  // Immediate updates for switch events
   updateConversation()
   updateActivity()
   updateBoxTitle()
@@ -631,25 +658,26 @@ storeEmitter.on('switch', () => {
 })
 
 storeEmitter.on('name-updated', () => {
+  // Name changes are infrequent; update immediately
   updateBoxTitle()
   updateTabs()
 })
 
 storeEmitter.on('activity-updated', () => {
-  updateActivity()
+  scheduleActivityUpdate()
 })
 
 storeEmitter.on('health-checked', () => {
-  updateBoxTitle()
-  updateTabs()
+  scheduleStatusUpdate()
 })
 
 storeEmitter.on('stream-start', () => {
-  // streaming flag is set per-block in updateConversation
+  // streaming flag is set per-block in updateConversation; no immediate UI update needed
 })
 
 storeEmitter.on('stream-end', () => {
   if (_streamingMd) { _streamingMd.streaming = false; _streamingMd = null }
+  scheduleConversationUpdate()
 })
 
 storeEmitter.on('focus-input', () => {
