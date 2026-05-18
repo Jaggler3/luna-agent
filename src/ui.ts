@@ -20,10 +20,6 @@ const scheduleConversationUpdate = makeDebouncedUpdate(() => {
   updateConversation()
 })
 
-const scheduleActivityUpdate = makeDebouncedUpdate(() => {
-  updateActivity()
-})
-
 const scheduleStatusUpdate = makeDebouncedUpdate(() => {
   updateBoxTitle()
   updateTabs()
@@ -35,86 +31,16 @@ let tabAreaInstance: Renderable | null = null
 let conversationBoxInstance: Renderable | null = null
 let activityBoxInstance: Renderable | null = null
 let tabsBoxInstance: Renderable | null = null
-let conversationListInstance: any = null
 let sidebarCollapsed = false
 
 // ── UI components ─────────────────────────────────────────
 
-// Background colours for each message role
-const MSG_BG = {
-  user:      '#1f2335',  // slightly lighter than bg
-  assistant: '#1a1b26',  // same as bg (neutral)
-  thoughts:  '#1e1d2e',  // faint purple tint
-  system:    '#1e2030',  // faint blue tint
-  error:     '#2a1520',  // faint red tint
-} as const
-
-// Container that the ScrollBox holds – column of message blocks
-export const conversationList = Box({
-  id: 'conversation-list',
-  flexDirection: 'column',
-  gap: 1,
-  width: '100%',
-} as any) as any
-
-// Track rendered message blocks so we can diff them
-interface MsgBlock {
-  key: string               // stable id for this block
-  boxId: string
-  mdId: string
-  isStreaming: boolean
-  md: MarkdownRenderable
-  box: any
-}
-let _msgBlocks: MsgBlock[] = []
-let _streamingMd: MarkdownRenderable | null = null
-
-function makeMessageBox(role: 'user' | 'assistant' | 'thoughts' | 'system' | 'error', boxId: string, mdId: string, content: string, isStreaming: boolean): MsgBlock {
-  const bgColor = MSG_BG[role]
-
-  const md = new MarkdownRenderable(renderer, {
-    id: mdId,
-    syntaxStyle,
-    fg: theme.fg,
-    content,
-    streaming: isStreaming,
-    internalBlockMode: 'top-level',
-  })
-
-  // Label styling per role
-  let labelChunks: any[] = []
-  if (role === 'user') {
-    labelChunks = [fg(theme.blue)('you')]
-  } else if (role === 'assistant') {
-    labelChunks = [fg(theme.purple)('luna')]
-  } else if (role === 'thoughts') {
-    labelChunks = [fg(theme.comment)('thinking')]
-  } else if (role === 'error') {
-    labelChunks = [fg(theme.red)('error')]
-  } else {
-    labelChunks = [fg(theme.comment)('system')]
-  }
-
-  const label = new TextRenderable(renderer, {
-    id: `${mdId}-label`,
-    content: new StyledText(labelChunks),
-    selectable: false,
-  })
-
-  const box = Box({
-    id: boxId,
-    flexDirection: 'column',
-    backgroundColor: bgColor,
-    paddingX: 2,
-    paddingTop: 1,
-    paddingBottom: 1,
-    gap: 0,
-    width: '100%',
-  } as any, label, md) as any
-
-  return { key: boxId, boxId, mdId, isStreaming, md, box }
-}
-
+export const markdownConversation = new MarkdownRenderable(renderer, {
+  id: 'conversation-content',
+  syntaxStyle,
+  fg: theme.fg,
+  content: '',
+})
 
 export const activityText = new TextRenderable(renderer, {
   id: 'activity-content',
@@ -183,7 +109,7 @@ export const conversationBox = Box(
       stickyStart: "bottom",
       scrollY: true,
     },
-    conversationList,
+    markdownConversation,
   ),
   input,
 ) as any
@@ -272,216 +198,45 @@ export function toggleSidebar() {
   } catch (e) { log('toggleSidebar error', e) }
 }
 
-const COMMON_EXTENSIONS = [
-  'ts', 'tsx', 'js', 'jsx', 'json', 'md', 'yml', 'yaml', 'toml',
-  'txt', 'rs', 'go', 'py', 'sh', 'css', 'html', 'lock', 'ini',
-  'cfg', 'conf', 'log', 'env', 'gitignore', 'gitattributes'
-];
-
-const EXCLUDED_SLASH_WORDS = new Set([
-  'his/her', 'him/her', 'he/she', 'and/or', 'either/or', 'yes/no',
-  'true/false', 'on/off', 'in/out', 'up/down', 'left/right',
-  'black/white', 'man/woman', 'boy/girl', 'read/write', 'import/export',
-  'input/output', 'get/set', 'a/b', 'x/y', 'w/o'
-]);
-
-function isFilePath(path: string): boolean {
-  const clean = path.trim().replace(/[/\\]+$/, '');
-
-  if (clean.startsWith('./') || clean.startsWith('../') || clean.startsWith('.\\') || clean.startsWith('..\\')) {
-    return true;
-  }
-  if (clean.startsWith('/') && clean.includes('/') && clean.length > 2) {
-    return true;
-  }
-  if (/^[A-Za-z]:\\[\w\.-]+/.test(clean)) {
-    return true;
-  }
-  if ((clean.includes('/') || clean.includes('\\')) && /\.[a-zA-Z0-9_-]+$/.test(clean)) {
-    return true;
-  }
-
-  const fileName = clean.split(/[/\\]/).pop() || '';
-  if (fileName.startsWith('.') && fileName.length > 1) {
-    return true;
-  }
-  const ext = fileName.split('.').pop()?.toLowerCase() || '';
-  if (COMMON_EXTENSIONS.includes(ext)) {
-    return true;
-  }
-
-  return false;
-}
-
-function isDirectoryPath(path: string): boolean {
-  const clean = path.trim();
-  if (EXCLUDED_SLASH_WORDS.has(clean.toLowerCase())) {
-    return false;
-  }
-  if (clean.endsWith('/') || clean.endsWith('\\')) {
-    return true;
-  }
-  if (clean.startsWith('./') || clean.startsWith('../') || clean.startsWith('/') || clean.startsWith('~/')) {
-    return true;
-  }
-
-  const segments = clean.split(/[/\\]/);
-  const knownDirs = [
-    'node_modules', 'packages', 'src', '.git', 'bin', 'lib', 'dist', 'build',
-    '.github', 'test', 'tests', 'apps', 'components', 'utils', 'helpers',
-    'config', 'public', 'assets', 'docs', 'scripts', 'server', 'client'
-  ];
-
-  if (segments.some(seg => knownDirs.includes(seg.toLowerCase()))) {
-    return true;
-  }
-  if (segments.length >= 3) {
-    return true;
-  }
-
-  return false;
-}
-
-function highlightPathsInPlainText(text: string): string {
-  const urls: string[] = [];
-  let placeholderText = text.replace(/https?:\/\/[^\s]+/g, (url) => {
-    urls.push(url);
-    return `__URL_PLACEHOLDER_${urls.length - 1}__`;
-  });
-
-  const pathRegex = /(?:\b|(?<=[\s"'\(\[]))((?:\.\.?\/|~\/|\/)[a-zA-Z0-9_\-\.\+]+(?:\/[a-zA-Z0-9_\-\.\+]+)*|(?:\.\.?\\|~\\|[a-zA-Z0-9_\-\.]+)\\[a-zA-Z0-9_\-\.\\\+]+|[a-zA-Z0-9_\-\.\+]+(?:\/[a-zA-Z0-9_\-\.\+]+)+|[a-zA-Z0-9_\-\.\+]+\.(?:ts|tsx|js|jsx|json|md|yml|yaml|toml|txt|rs|go|py|sh|css|html|lock)|\.[a-zA-Z0-9_\-]+)\b/g;
-
-  placeholderText = placeholderText.replace(pathRegex, (match) => {
-    const cleanMatch = match.trim();
-    if (isFilePath(cleanMatch)) {
-      return `\`📄 ${cleanMatch}\``;
-    } else if (isDirectoryPath(cleanMatch)) {
-      return `\`📁 ${cleanMatch}\``;
-    }
-    return match;
-  });
-
-  return placeholderText.replace(/__URL_PLACEHOLDER_(\d+)__/g, (_, idx) => {
-    return urls[parseInt(idx, 10)];
-  });
-}
-
-function preprocessMarkdown(text: string): string {
-  const codeBlockParts = text.split(/(```[\s\S]*?```)/g);
-
-  return codeBlockParts.map((part, index) => {
-    if (index % 2 === 1) {
-      return part;
-    }
-
-    const inlineParts = part.split(/(`[^`\n]+`)/g);
-
-    return inlineParts.map((subPart, subIndex) => {
-      if (subIndex % 2 === 1) {
-        const inner = subPart.slice(1, -1).trim();
-        if (isFilePath(inner)) {
-          return `\`📄 ${inner}\``;
-        } else if (isDirectoryPath(inner)) {
-          return `\`📁 ${inner}\``;
-        }
-        return subPart;
-      }
-
-      return highlightPathsInPlainText(subPart);
-    }).join('');
-  }).join('');
-}
-
 export function updateConversation() {
   try {
     const a = activeAgent()
-    const list = (conversationListInstance ?? conversationList) as unknown as { add(c: unknown): void; remove(id: string): void; getChildren(): { id: string }[] }
-
     if (!a || a.messages.length === 0) {
-      // Clear all blocks
-      for (const b of _msgBlocks) list.remove(b.boxId)
-      _msgBlocks = []
-      _streamingMd = null
+      markdownConversation.content = ''
       return
     }
-
-    // Build desired block descriptors
-    type BlockDesc = { key: string; role: 'user' | 'assistant' | 'thoughts' | 'system' | 'error'; content: string; isStreaming: boolean }
-    const desired: BlockDesc[] = []
-
+    const parts: string[] = []
     for (let i = 0; i < a.messages.length; i++) {
       const msg = a.messages[i]
-
-      if (!msg.preprocessedContent || msg.lastPreprocessedSource !== msg.content) {
-        msg.preprocessedContent = preprocessMarkdown(msg.content)
-        msg.lastPreprocessedSource = msg.content
-      }
-
-      const isLast = i === a.messages.length - 1
-      const isMsgStreaming = a.isBusy && isLast
-
+      if (parts.length > 0) parts.push('\n\n')
       if (msg.role === 'user') {
-        desired.push({ key: `msg-${i}-user`, role: 'user', content: msg.preprocessedContent, isStreaming: false })
+        parts.push(`> ${msg.content.replace(/\n/g, '\n> ')}`)
       } else if (msg.role === 'assistant') {
+        const messageParts: string[] = []
         if (msg.reasoning && msg.reasoning.trim()) {
-          const showFull = isMsgStreaming || msg.thinkingExpanded
-          const thoughtContent = showFull
-            ? msg.reasoning.trim()
-            : '_▶ thoughts (click /t to expand)_'
-          desired.push({ key: `msg-${i}-thoughts`, role: 'thoughts', content: thoughtContent, isStreaming: isMsgStreaming && !msg.content })
+          const isStreaming = a.isBusy && i === a.messages.length - 1
+          if (isStreaming || msg.thinkingExpanded) {
+            messageParts.push(`> [!NOTE]\n> **Thinking Process:**\n> ${msg.reasoning.trim().replace(/\n/g, '\n> ')}`)
+          } else {
+            messageParts.push(`> **[Thinking Process collapsed. Press Ctrl+T or click button below to expand]**`)
+          }
         }
         if (msg.content) {
-          desired.push({ key: `msg-${i}-assistant`, role: 'assistant', content: msg.preprocessedContent, isStreaming: isMsgStreaming })
+          if (messageParts.length > 0) messageParts.push('\n\n')
+          messageParts.push(msg.content)
         }
+        parts.push(messageParts.join(''))
       } else if (msg.role === 'system') {
-        const role = msg.error ? 'error' : 'system'
-        desired.push({ key: `msg-${i}-${role}`, role, content: msg.preprocessedContent, isStreaming: false })
-      }
-    }
-
-    // Diff: remove blocks no longer needed (by key)
-    const desiredKeys = new Set(desired.map(d => d.key))
-    const surviving: MsgBlock[] = []
-    for (const b of _msgBlocks) {
-      if (!desiredKeys.has(b.key)) {
-        list.remove(b.boxId)
-      } else {
-        surviving.push(b)
-      }
-    }
-    const survivingMap = new Map(surviving.map(b => [b.key, b]))
-
-    // Add / update blocks in order
-    const newBlocks: MsgBlock[] = []
-    let nextStreamingMd: MarkdownRenderable | null = null
-    for (const desc of desired) {
-      const existing = survivingMap.get(desc.key)
-      if (existing) {
-        if (existing.md.content !== desc.content) {
-          existing.md.content = desc.content
+        if (msg.error) {
+          parts.push(`*error: ${msg.content}*`)
+        } else {
+          parts.push(`*system: ${msg.content}*`)
         }
-        if (desc.isStreaming) nextStreamingMd = existing.md
-        newBlocks.push(existing)
       } else {
-        // Create new block
-        const boxId = `block-${desc.key}`
-        const mdId = `md-${desc.key}`
-        const block = makeMessageBox(desc.role, boxId, mdId, desc.content, desc.isStreaming)
-        if (desc.isStreaming) nextStreamingMd = block.md
-        list.add(block.box)
-        newBlocks.push(block)
+        parts.push(msg.content)
       }
     }
-
-    if (_streamingMd && _streamingMd !== nextStreamingMd && _streamingMd.streaming) {
-      _streamingMd.streaming = false
-    }
-    if (nextStreamingMd && !nextStreamingMd.streaming) {
-      nextStreamingMd.streaming = true
-    }
-    _streamingMd = nextStreamingMd
-
-    _msgBlocks = newBlocks
+    markdownConversation.content = parts.join('')
   } catch (e) { log('updateConversation error', e) }
 }
 
@@ -491,37 +246,9 @@ export function updateActivity() {
     const hasDiffs = a ? a.diffLines.length > 0 : false
     if (activityBoxInstance) {
       (activityBoxInstance as unknown as { visible: boolean; width: number }).visible = hasDiffs;
-      (activityBoxInstance as unknown as { visible: boolean; width: number }).width = hasDiffs ? 50 : 0;
+      (activityBoxInstance as unknown as { visible: boolean; width: number }).width = hasDiffs ? 35 : 0
     }
-    if (hasDiffs && a) {
-      const fullText = a.diffLines.join('\n')
-      const lines = fullText.split('\n')
-      const chunks: any[] = []
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
-        if (line.startsWith('✎')) {
-          chunks.push(fg(theme.purple)(line))
-        } else if (line === '---') {
-          chunks.push(fg(theme.comment)(line))
-        } else if (line.startsWith('+++') || line.startsWith('---')) {
-          chunks.push(fg(theme.yellow)(line))
-        } else if (line.startsWith('+')) {
-          chunks.push(fg(theme.green)(line))
-        } else if (line.startsWith('-')) {
-          chunks.push(fg(theme.red)(line))
-        } else if (line.startsWith('@@')) {
-          chunks.push(fg(theme.cyan)(line))
-        } else {
-          chunks.push(fg(theme.fg)(line))
-        }
-        if (i < lines.length - 1) {
-          chunks.push('\n')
-        }
-      }
-      activityText.content = new StyledText(chunks)
-    } else {
-      activityText.content = ''
-    }
+    activityText.content = hasDiffs && a ? a.diffLines.join('\n') : ''
   } catch (e) { log('updateActivity error', e) }
 }
 
@@ -644,12 +371,7 @@ storeEmitter.on('update', () => {
 })
 
 storeEmitter.on('switch', () => {
-  // Clear all blocks when switching agents so they rebuild fresh
-  const list = (conversationListInstance ?? conversationList) as unknown as { remove(id: string): void; getChildren(): { id: string }[] }
-  for (const b of _msgBlocks) list.remove(b.boxId)
-  _msgBlocks = []
-  if (_streamingMd) { _streamingMd.streaming = false; _streamingMd = null }
-  // Immediate updates for switch events
+  markdownConversation.streaming = false
   updateConversation()
   updateActivity()
   updateBoxTitle()
@@ -664,7 +386,7 @@ storeEmitter.on('name-updated', () => {
 })
 
 storeEmitter.on('activity-updated', () => {
-  scheduleActivityUpdate()
+  updateActivity()
 })
 
 storeEmitter.on('health-checked', () => {
@@ -672,11 +394,11 @@ storeEmitter.on('health-checked', () => {
 })
 
 storeEmitter.on('stream-start', () => {
-  // streaming flag is set per-block in updateConversation; no immediate UI update needed
+  if (!markdownConversation.streaming) markdownConversation.streaming = true
 })
 
 storeEmitter.on('stream-end', () => {
-  if (_streamingMd) { _streamingMd.streaming = false; _streamingMd = null }
+  markdownConversation.streaming = false
   scheduleConversationUpdate()
 })
 
@@ -708,8 +430,6 @@ export function bootUI() {
   if (foundConvBox) conversationBoxInstance = foundConvBox
   const foundActivityBox = renderer.root.findDescendantById('activity-box')
   if (foundActivityBox) activityBoxInstance = foundActivityBox
-  const foundConvList = renderer.root.findDescendantById('conversation-list')
-  if (foundConvList) conversationListInstance = foundConvList
 
   input.focus()
 
