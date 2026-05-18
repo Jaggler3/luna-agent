@@ -1,4 +1,5 @@
-import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, StyledText, fg, bg, MarkdownRenderable } from "@opentui/core"
+import { execFileSync } from 'node:child_process'
+import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, StyledText, fg, bg, MarkdownRenderable, DiffRenderable, pathToFiletype } from "@opentui/core"
 import type { TextChunk, Renderable } from "@opentui/core"
 import { theme, syntaxStyle, log } from './config'
 import { agents, activeAgent, activeId, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, scanAgents, saveConversation, storeEmitter } from './store'
@@ -20,6 +21,10 @@ const scheduleConversationUpdate = makeDebouncedUpdate(() => {
   updateConversation()
 })
 
+const scheduleActivityUpdate = makeDebouncedUpdate(() => {
+  updateActivity()
+})
+
 const scheduleStatusUpdate = makeDebouncedUpdate(() => {
   updateBoxTitle()
   updateTabs()
@@ -32,21 +37,86 @@ let conversationBoxInstance: Renderable | null = null
 let activityBoxInstance: Renderable | null = null
 let tabsBoxInstance: Renderable | null = null
 let sidebarCollapsed = false
+let activityListInstance: any = null
+let activityRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 // ── UI components ─────────────────────────────────────────
 
-export const markdownConversation = new MarkdownRenderable(renderer, {
-  id: 'conversation-content',
-  syntaxStyle,
-  fg: theme.fg,
-  content: '',
-})
+const MSG_BG = {
+  user: '#20283a',
+  assistant: theme.bg,
+  thoughts: '#1e1d2e',
+  system: '#1e2030',
+  error: '#2a1520',
+} as const
 
-export const activityText = new TextRenderable(renderer, {
-  id: 'activity-content',
-  fg: theme.fg,
-  content: '',
-})
+type MessageRole = keyof typeof MSG_BG
+type BodyMode = 'text' | 'markdown'
+type MessageBlock = {
+  key: string
+  boxId: string
+  role: MessageRole
+  mode: BodyMode
+  content: string
+  body: TextRenderable | MarkdownRenderable
+  box: any
+}
+
+const conversationBlocks: MessageBlock[] = []
+
+export const conversationList = Box({
+  id: 'conversation-list',
+  flexDirection: 'column',
+  gap: 1,
+  width: '100%',
+} as any) as any
+
+let conversationListInstance: any = null
+
+type GitFileChange = {
+  key: string
+  path: string
+  status: string
+  sections: GitDiffSection[]
+}
+
+type GitDiffSection = {
+  label: string
+  diff: string
+  filetype: string
+}
+
+type GitActivityBlock = {
+  key: string
+  boxId: string
+  path: string
+  status: string
+  sections: GitDiffSection[]
+  expanded: boolean
+  header: TextRenderable
+  body: any
+  box: any
+}
+
+const activityBlocks: GitActivityBlock[] = []
+
+function makeRenderableId(prefix: string, key: string): string {
+  let hash = 0
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0
+  }
+  const safeKey = key
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return `${prefix}-${safeKey || 'item'}-${hash.toString(36)}`
+}
+
+export const activityList = Box({
+  id: 'activity-list',
+  flexDirection: 'column',
+  gap: 1,
+  width: '100%',
+} as any) as any
 
 export const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 24 })
 
@@ -109,7 +179,7 @@ export const conversationBox = Box(
       stickyStart: "bottom",
       scrollY: true,
     },
-    markdownConversation,
+    conversationList,
   ),
   input,
 ) as any
@@ -122,8 +192,8 @@ export const activityBox = Box(
     borderStyle: "rounded",
     borderColor: theme.border,
     backgroundColor: theme.bg,
-    title: "Activity",
-    titleColor: theme.purple,
+    title: "",
+    titleColor: theme.green,
     padding: 1,
     gap: 1,
   } as any,
@@ -134,7 +204,7 @@ export const activityBox = Box(
       stickyStart: "bottom",
       scrollY: true,
     },
-    activityText,
+    activityList,
   ),
 ) as any
 
@@ -161,6 +231,222 @@ export function updateBoxTitle() {
     const cwd = process.env.LUNA_CWD ?? process.cwd()
     target.title = `${a.meta.name}${pid}${dot}  ${cwd}`
   } catch (e) { log('updateBoxTitle error', e) }
+}
+
+function gitCwd(): string {
+  return process.env.LUNA_CWD ?? process.cwd()
+}
+
+function runGit(args: string[]): string | null {
+  try {
+    return execFileSync('git', ['-C', gitCwd(), ...args], { encoding: 'utf-8' }).trimEnd()
+  } catch (err: any) {
+    if (typeof err?.stdout === 'string') return err.stdout.trimEnd()
+    return null
+  }
+}
+
+function isGitRepo(): boolean {
+  return runGit(['rev-parse', '--is-inside-work-tree']) === 'true'
+}
+
+function getGitBranchLabel(): string | null {
+  if (!isGitRepo()) return null
+  const branch = runGit(['branch', '--show-current'])?.trim()
+  if (branch) return branch
+  const detached = runGit(['rev-parse', '--short', 'HEAD'])?.trim()
+  return detached ? `HEAD:${detached}` : 'HEAD'
+}
+
+function readGitStatus(): GitFileChange[] {
+  const raw = runGit(['status', '--porcelain=v1', '--no-renames', '-uall', '-z'])
+  if (!raw) return []
+  const records = raw.split('\0').filter(Boolean)
+  const changes: GitFileChange[] = []
+  for (const record of records) {
+    const status = record.slice(0, 2)
+    const path = record.slice(3)
+    if (!path) continue
+    changes.push({
+      key: path,
+      path,
+      status,
+      sections: buildGitFileDiffSections(path, status),
+    })
+  }
+  return changes
+}
+
+function buildGitFileDiffSections(path: string, status: string): GitDiffSection[] {
+  const sections: GitDiffSection[] = []
+  const filetype = pathToFiletype(path) ?? 'text'
+  const staged = status[0] && status[0] !== ' ' && status[0] !== '?'
+  const unstaged = status[1] && status[1] !== ' '
+  const untracked = status === '??'
+
+  if (staged) {
+    const stagedDiff = runGit(['diff', '--cached', '--no-color', '--', path])
+    if (stagedDiff) sections.push({ label: 'staged', diff: stagedDiff, filetype })
+  }
+  if (untracked) {
+    const added = runGit(['diff', '--no-index', '--no-color', '--', '/dev/null', path])
+    if (added) sections.push({ label: 'untracked', diff: added, filetype })
+  } else if (unstaged) {
+    const workingDiff = runGit(['diff', '--no-color', '--', path])
+    if (workingDiff) sections.push({ label: 'working tree', diff: workingDiff, filetype })
+  }
+
+  return sections
+}
+
+function makeActivityHeader(change: GitFileChange, expanded: boolean): StyledText {
+  const arrow = expanded ? '▼' : '▶'
+  const status = change.status.trim()
+  const statusStyle = getGitStatusStyle(status)
+  const chunks: TextChunk[] = [fg(theme.green)(` ${arrow} `), fg(theme.fg)(change.path)]
+  if (status) chunks.push(fg(statusStyle)(` [${status}]`))
+  return new StyledText(chunks)
+}
+
+function getGitStatusStyle(status: string): string {
+  if (status === '??') return theme.yellow
+  if (status.includes('D')) return theme.red
+  if (status.includes('A')) return theme.green
+  if (status.includes('M')) return theme.yellow
+  if (status.includes('R')) return theme.blue
+  if (status.includes('C')) return theme.cyan
+  if (status.includes('U')) return theme.red
+  return theme.comment
+}
+
+function makeDiffRenderable(change: GitFileChange, section: GitDiffSection, sectionIndex: number) {
+  const diff = new DiffRenderable(renderer, {
+    id: `${makeRenderableId('activity-diff', `${change.key}-${sectionIndex}`)}-diff`,
+    diff: section.diff,
+    view: 'unified',
+    filetype: section.filetype,
+    syntaxStyle,
+    fg: theme.fg,
+    wrapMode: 'none',
+    syncScroll: true,
+    showLineNumbers: true,
+    addedBg: '#153025',
+    removedBg: '#30171d',
+    contextBg: 'transparent',
+    addedSignColor: theme.green,
+    removedSignColor: theme.red,
+    lineNumberFg: theme.comment,
+  } as any)
+
+  const code = (diff as any).leftCodeRenderable ?? (diff as any).rightCodeRenderable
+  diff.onMouseScroll = (ev: any) => {
+    const direction = ev?.scroll?.direction
+    if (!code || !direction) return
+    const delta = ev?.scroll?.delta ?? 1
+    if (direction === 'left' || (direction === 'up' && ev?.modifiers?.shift)) {
+      code.scrollX = Math.max(0, code.scrollX - delta)
+      diff.requestRender()
+    } else if (direction === 'right' || (direction === 'down' && ev?.modifiers?.shift)) {
+      code.scrollX = Math.max(0, code.scrollX + delta)
+      diff.requestRender()
+    }
+  }
+
+  return diff
+}
+
+function makeActivitySectionBlock(change: GitFileChange, section: GitDiffSection, sectionIndex: number) {
+  const label = new TextRenderable(renderer, {
+    id: `${makeRenderableId('activity-section', `${change.key}-${sectionIndex}`)}-label`,
+    content: new StyledText([
+      fg(theme.comment)(`  ${section.label}`),
+    ]),
+    selectable: false,
+  })
+  const diff = makeDiffRenderable(change, section, sectionIndex)
+  return Box(
+    {
+      flexDirection: 'column',
+      backgroundColor: theme.bgHighlight,
+      paddingX: 1,
+      paddingTop: 1,
+      paddingBottom: 1,
+      gap: 1,
+      width: '100%',
+    } as any,
+    label,
+    diff,
+  ) as any
+}
+
+function makeActivityBlock(change: GitFileChange): GitActivityBlock {
+  const boxId = makeRenderableId('activity', change.key)
+  const header = new TextRenderable(renderer, {
+    id: `${boxId}-header`,
+    content: makeActivityHeader(change, false),
+    selectable: false,
+  })
+  const bodyChildren = change.sections.length > 0
+    ? change.sections.map((section, index) => makeActivitySectionBlock(change, section, index))
+    : [
+      new TextRenderable(renderer, {
+        id: `${boxId}-body-empty`,
+        content: '(no diff output)',
+        selectable: false,
+      }),
+    ]
+  const body = Box(
+    {
+      id: `${boxId}-body`,
+      flexDirection: 'column',
+      gap: 1,
+      width: '100%',
+    } as any,
+    ...bodyChildren,
+  ) as any
+  body.visible = false
+  const box = Box(
+    {
+      id: boxId,
+      flexDirection: 'column',
+      backgroundColor: theme.bg,
+      paddingX: 2,
+      paddingTop: 1,
+      paddingBottom: 1,
+      gap: 1,
+      width: '100%',
+    } as any,
+    header,
+    body,
+  ) as any
+
+  const block: GitActivityBlock = {
+    key: change.key,
+    boxId,
+    path: change.path,
+    status: change.status,
+    sections: change.sections,
+    expanded: false,
+    header,
+    body,
+    box,
+  }
+  header.onMouseDown = (ev: { button: number }) => {
+    if (ev.button === 0) toggleActivityBlock(block.key)
+  }
+  return block
+}
+
+function toggleActivityBlock(key: string) {
+  const block = activityBlocks.find((b) => b.key === key)
+  if (!block) return
+  block.expanded = !block.expanded
+  block.body.visible = block.expanded
+  block.header.content = makeActivityHeader({ key: block.key, path: block.path, status: block.status, sections: block.sections }, block.expanded)
+  block.body.requestRender()
+  block.box.requestRender()
+  activityBoxInstance?.requestRender?.()
+  renderer.requestRender()
 }
 
 export function toggleLatestThought(index?: number) {
@@ -198,58 +484,211 @@ export function toggleSidebar() {
   } catch (e) { log('toggleSidebar error', e) }
 }
 
+function makeRoleLabel(role: MessageRole): StyledText {
+  if (role === 'user') return new StyledText([fg(theme.blue)('you')])
+  if (role === 'assistant') return new StyledText([fg(theme.purple)('luna')])
+  if (role === 'thoughts') return new StyledText([fg(theme.comment)('thinking')])
+  if (role === 'error') return new StyledText([fg(theme.red)('error')])
+  return new StyledText([fg(theme.comment)('system')])
+}
+
+function makeMessageBlock(desc: { key: string; role: MessageRole; mode: BodyMode; content: string }): MessageBlock {
+  const boxId = `block-${desc.key}`
+  const bodyId = `body-${desc.key}`
+  const body = desc.mode === 'markdown'
+    ? new MarkdownRenderable(renderer, {
+      id: bodyId,
+      syntaxStyle,
+      fg: theme.fg,
+      content: desc.content,
+    })
+    : new TextRenderable(renderer, {
+      id: bodyId,
+      fg: theme.fg,
+      content: desc.content,
+      wrapMode: 'word',
+    })
+
+  const label = new TextRenderable(renderer, {
+    id: `${bodyId}-label`,
+    content: makeRoleLabel(desc.role),
+    selectable: false,
+  })
+
+  const box = Box({
+    id: boxId,
+    flexDirection: 'column',
+    backgroundColor: MSG_BG[desc.role],
+    paddingX: 2,
+    paddingTop: 1,
+    paddingBottom: 1,
+    gap: 0,
+    width: '100%',
+  } as any, label, body) as any
+
+  return { ...desc, boxId, body, box }
+}
+
+function setBlockContent(block: MessageBlock, content: string) {
+  if (block.content === content) return
+  block.content = content
+  block.body.content = content
+}
+
+function clearConversationBlocks() {
+  const list = (conversationListInstance ?? conversationList) as unknown as { remove(id: string): void }
+  for (const block of conversationBlocks) list.remove(block.boxId)
+  conversationBlocks.length = 0
+}
+
+function assistantMarkdownContent(msg: { content: string; reasoning?: string; thinkingExpanded?: boolean }, isStreaming: boolean): string {
+  const parts: string[] = []
+  if (msg.reasoning && msg.reasoning.trim()) {
+    if (isStreaming || msg.thinkingExpanded) {
+      parts.push(`> [!NOTE]\n> **Thinking Process:**\n> ${msg.reasoning.trim().replace(/\n/g, '\n> ')}`)
+    }
+  }
+  if (msg.content) {
+    if (parts.length > 0) parts.push('\n\n')
+    parts.push(msg.content)
+  }
+  return parts.join('')
+}
+
+function assistantTextContent(msg: { content: string; reasoning?: string }): string {
+  const parts: string[] = []
+  if (msg.reasoning && msg.reasoning.trim()) {
+    parts.push(`thinking\n${msg.reasoning.trim()}`)
+  }
+  if (msg.content) parts.push(msg.content)
+  return parts.join('\n\n')
+}
+
 export function updateConversation() {
   try {
     const a = activeAgent()
     if (!a || a.messages.length === 0) {
-      markdownConversation.content = ''
+      clearConversationBlocks()
       return
     }
-    const parts: string[] = []
+    const desired: { key: string; role: MessageRole; mode: BodyMode; content: string }[] = []
+
     for (let i = 0; i < a.messages.length; i++) {
       const msg = a.messages[i]
-      if (parts.length > 0) parts.push('\n\n')
       if (msg.role === 'user') {
-        parts.push(`> ${msg.content.replace(/\n/g, '\n> ')}`)
+        desired.push({ key: `msg-${i}-user`, role: 'user', mode: 'text', content: msg.content })
       } else if (msg.role === 'assistant') {
-        const messageParts: string[] = []
-        if (msg.reasoning && msg.reasoning.trim()) {
-          const isStreaming = a.isBusy && i === a.messages.length - 1
-          if (isStreaming || msg.thinkingExpanded) {
-            messageParts.push(`> [!NOTE]\n> **Thinking Process:**\n> ${msg.reasoning.trim().replace(/\n/g, '\n> ')}`)
-          } else {
-            messageParts.push(`> **[Thinking Process collapsed. Press Ctrl+T or click button below to expand]**`)
-          }
-        }
-        if (msg.content) {
-          if (messageParts.length > 0) messageParts.push('\n\n')
-          messageParts.push(msg.content)
-        }
-        parts.push(messageParts.join(''))
+        const isStreaming = a.isBusy && i === a.messages.length - 1
+        desired.push({
+          key: `msg-${i}-assistant`,
+          role: 'assistant',
+          mode: isStreaming ? 'text' : 'markdown',
+          content: isStreaming ? assistantTextContent(msg) : assistantMarkdownContent(msg, false),
+        })
       } else if (msg.role === 'system') {
-        if (msg.error) {
-          parts.push(`*error: ${msg.content}*`)
-        } else {
-          parts.push(`*system: ${msg.content}*`)
-        }
-      } else {
-        parts.push(msg.content)
+        desired.push({
+          key: `msg-${i}-system`,
+          role: msg.error ? 'error' : 'system',
+          mode: 'text',
+          content: msg.content,
+        })
       }
     }
-    markdownConversation.content = parts.join('')
+
+    const list = (conversationListInstance ?? conversationList) as unknown as { add(c: unknown): void; remove(id: string): void }
+    const desiredKeys = new Set(desired.map((desc) => desc.key))
+    for (let i = conversationBlocks.length - 1; i >= 0; i--) {
+      const block = conversationBlocks[i]
+      const next = desired.find((desc) => desc.key === block.key)
+      if (!desiredKeys.has(block.key) || !next || next.mode !== block.mode || next.role !== block.role) {
+        list.remove(block.boxId)
+        conversationBlocks.splice(i, 1)
+      }
+    }
+
+    const blocksByKey = new Map(conversationBlocks.map((block) => [block.key, block]))
+    for (const desc of desired) {
+      const block = blocksByKey.get(desc.key)
+      if (block) {
+        setBlockContent(block, desc.content)
+      } else {
+        const next = makeMessageBlock(desc)
+        list.add(next.box)
+        conversationBlocks.push(next)
+      }
+    }
   } catch (e) { log('updateConversation error', e) }
 }
 
 export function updateActivity() {
   try {
-    const a = activeAgent()
-    const hasDiffs = a ? a.diffLines.length > 0 : false
+    const insideRepo = isGitRepo()
+    const previousExpanded = new Map(activityBlocks.map((block) => [block.key, block.expanded]))
+    const list = (activityListInstance ?? activityList) as unknown as { add(c: unknown): void; remove(id: string): void }
+    for (const block of activityBlocks) list.remove(block.boxId)
+    activityBlocks.length = 0
+
     if (activityBoxInstance) {
-      (activityBoxInstance as unknown as { visible: boolean; width: number }).visible = hasDiffs;
-      (activityBoxInstance as unknown as { visible: boolean; width: number }).width = hasDiffs ? 35 : 0
+      const target = activityBoxInstance as unknown as { visible: boolean; width: number; title: string }
+      target.visible = insideRepo
+      target.width = insideRepo ? 42 : 0
+      target.title = insideRepo ? (getGitBranchLabel() ?? '') : ''
     }
-    activityText.content = hasDiffs && a ? a.diffLines.join('\n') : ''
-  } catch (e) { log('updateActivity error', e) }
+    if (!insideRepo) {
+      return
+    }
+
+    const changes = readGitStatus()
+    if (changes.length === 0) {
+      const emptyKey = '__clean__'
+      const boxId = makeRenderableId('activity-clean', emptyKey)
+      const header = new TextRenderable(renderer, {
+        id: `${boxId}-header`,
+        content: '▶ working tree clean',
+        selectable: false,
+      })
+      const body = new TextRenderable(renderer, {
+        id: `${boxId}-body`,
+        content: 'No current changes.',
+        selectable: false,
+      })
+      const box = Box({
+        id: boxId,
+        flexDirection: 'column',
+        backgroundColor: theme.bg,
+        paddingX: 2,
+        paddingTop: 1,
+        paddingBottom: 1,
+        gap: 1,
+        width: '100%',
+      } as any, header, body) as any
+      body.visible = false
+      const block: GitActivityBlock = {
+        key: emptyKey,
+        boxId,
+        path: 'working tree clean',
+        status: '',
+        sections: [],
+        expanded: false,
+        header,
+        body,
+        box,
+      }
+      header.onMouseDown = (ev: { button: number }) => { if (ev.button === 0) toggleActivityBlock(emptyKey) }
+      list.add(block.box)
+      activityBlocks.push(block)
+      return
+    }
+
+    for (const change of changes) {
+      const next = makeActivityBlock(change)
+      next.expanded = previousExpanded.get(next.key) ?? false
+      next.body.visible = next.expanded
+      next.header.content = makeActivityHeader(change, next.expanded)
+      list.add(next.box)
+      activityBlocks.push(next)
+    }
+  } catch (e) { log('updateActivity error', String(e), (e as any)?.stack ?? '') }
 }
 
 export function updateTabs() {
@@ -371,7 +810,7 @@ storeEmitter.on('update', () => {
 })
 
 storeEmitter.on('switch', () => {
-  markdownConversation.streaming = false
+  clearConversationBlocks()
   updateConversation()
   updateActivity()
   updateBoxTitle()
@@ -386,7 +825,7 @@ storeEmitter.on('name-updated', () => {
 })
 
 storeEmitter.on('activity-updated', () => {
-  updateActivity()
+  scheduleActivityUpdate()
 })
 
 storeEmitter.on('health-checked', () => {
@@ -394,11 +833,10 @@ storeEmitter.on('health-checked', () => {
 })
 
 storeEmitter.on('stream-start', () => {
-  if (!markdownConversation.streaming) markdownConversation.streaming = true
+  scheduleConversationUpdate()
 })
 
 storeEmitter.on('stream-end', () => {
-  markdownConversation.streaming = false
   scheduleConversationUpdate()
 })
 
@@ -430,6 +868,10 @@ export function bootUI() {
   if (foundConvBox) conversationBoxInstance = foundConvBox
   const foundActivityBox = renderer.root.findDescendantById('activity-box')
   if (foundActivityBox) activityBoxInstance = foundActivityBox
+  const foundConvList = renderer.root.findDescendantById('conversation-list')
+  if (foundConvList) conversationListInstance = foundConvList
+  const foundActivityList = renderer.root.findDescendantById('activity-list')
+  if (foundActivityList) activityListInstance = foundActivityList
 
   input.focus()
 
@@ -437,4 +879,11 @@ export function bootUI() {
   updateConversation()
   updateActivity()
   updateTabs()
+
+  if (!activityRefreshTimer) {
+    activityRefreshTimer = setInterval(() => {
+      updateActivity()
+    }, 2000)
+  }
+
 }

@@ -5,3 +5,4 @@ dist/
 AGENTS.md
 PLANS.md
 _test/
+.DS_Store
