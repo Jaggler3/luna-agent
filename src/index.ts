@@ -1,3 +1,5 @@
+#!/usr/bin/env bun
+
 import { unlinkSync } from 'node:fs'
 import { log } from './config'
 import { agents, createNewAgent, switchAgent, scanAgents, loadMeta, loadConversation, socketPath, saveMeta } from './store'
@@ -63,7 +65,7 @@ function cleanupAndExit(signal: string) {
   isCleaningUp = true
   log('CLEANUP AND EXIT triggered by', signal)
   cancelHealth()
-  
+
   for (const [id, a] of agents) {
     if (a.animTimer) {
       clearInterval(a.animTimer)
@@ -79,15 +81,15 @@ function cleanupAndExit(signal: string) {
     }
     if (a.conn) {
       log('killing agent gateway connection', id)
-      try { a.conn.kill() } catch {}
+      try { a.conn.kill() } catch { }
       a.conn = null
     }
     if (a.meta.pid) {
       log('killing agent process', a.meta.pid)
-      try { process.kill(a.meta.pid, 'SIGKILL') } catch {}
+      try { process.kill(a.meta.pid, 'SIGKILL') } catch { }
     }
     const sockPath = socketPath(id)
-    try { unlinkSync(sockPath) } catch {}
+    try { unlinkSync(sockPath) } catch { }
   }
   process.exit(0)
 }
@@ -99,13 +101,13 @@ process.on('exit', () => {
     isCleaningUp = true
     for (const [id, a] of agents) {
       if (a.conn) {
-        try { a.conn.kill() } catch {}
+        try { a.conn.kill() } catch { }
       }
       if (a.meta.pid) {
-        try { process.kill(a.meta.pid, 'SIGKILL') } catch {}
+        try { process.kill(a.meta.pid, 'SIGKILL') } catch { }
       }
       const sockPath = socketPath(id)
-      try { unlinkSync(sockPath) } catch {}
+      try { unlinkSync(sockPath) } catch { }
     }
   }
 })

@@ -4,7 +4,7 @@
     "": {
       "name": "luna",
       "dependencies": {
-        "@opentui/core": "^0.2.12",
+        "@opentui/core": "0.2.12",
         "luna-code": "workspace:*",
         "luna-gateway": "workspace:*",
       },
