@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
-import { AGENTS_DIR, log } from './config'
+import { AGENTS_DIR, currentWorkspaceCwd, log } from './config'
 import type { AgentMeta, AgentData } from './types'
 
 export const storeEmitter = new EventEmitter()
@@ -43,6 +43,16 @@ export function saveConversation(id: string, messages: any[]) {
   writeFileSync(conversationPath(id), JSON.stringify({ name: meta?.name ?? 'agent', messages }))
 }
 
+export function clearActiveConversation(): string | null {
+  const a = activeAgent()
+  if (!a) return null
+  a.messages = []
+  saveConversation(a.id, a.messages)
+  log('clearActiveConversation', a.id)
+  storeEmitter.emit('update')
+  return a.id
+}
+
 export function scanAgents(): string[] {
   if (!existsSync(AGENTS_DIR)) return []
   try {
@@ -64,12 +74,18 @@ export function createNewAgent(): string {
   const id = crypto.randomUUID()
   const dir = join(AGENTS_DIR, id)
   mkdirSync(dir, { recursive: true })
-  const meta: AgentMeta = { name: 'agent', pid: null, createdAt: new Date().toISOString() }
+  const meta: AgentMeta = {
+    name: 'agent',
+    pid: null,
+    createdAt: new Date().toISOString(),
+    cwd: currentWorkspaceCwd(),
+  }
   saveMeta(id, meta)
   const data: AgentData = {
     id, meta,
     messages: [],
     conn: null, isRunning: false, isBusy: false,
+    streamFrame: '',
     diffLines: [],
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }

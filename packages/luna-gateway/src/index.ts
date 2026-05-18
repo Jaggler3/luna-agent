@@ -85,6 +85,8 @@ export interface ConnectionOptions {
   entrypoint: string
   transport?: 'stdio' | 'socket'
   socketPath?: string
+  spawnCwd?: string
+  workspaceCwd?: string
 }
 
 export interface Connection {
@@ -208,7 +210,14 @@ export function connect(options: ConnectionOptions): Connection {
     const child = spawn('bun', ['run', entrypoint], {
       stdio: 'ignore',
       detached: true,
-      env: { ...process.env, AGENT_ID: options.agentId, LUNA_TRANSPORT: 'socket', LUNA_SOCKET_PATH: socketPath },
+      cwd: options.spawnCwd,
+      env: {
+        ...process.env,
+        AGENT_ID: options.agentId,
+        LUNA_TRANSPORT: 'socket',
+        LUNA_SOCKET_PATH: socketPath,
+        LUNA_CWD: options.workspaceCwd ?? options.spawnCwd ?? process.cwd(),
+      },
     })
     child.unref()
 
@@ -291,7 +300,12 @@ export function connect(options: ConnectionOptions): Connection {
 
   const child: ChildProcess = spawn('bun', ['run', entrypoint], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, AGENT_ID: options.agentId },
+    cwd: options.spawnCwd,
+    env: {
+      ...process.env,
+      AGENT_ID: options.agentId,
+      LUNA_CWD: options.workspaceCwd ?? options.spawnCwd ?? process.cwd(),
+    },
   })
 
   const stderrChunks: Buffer[] = []

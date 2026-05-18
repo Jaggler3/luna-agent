@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
 import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, StyledText, fg, bg, MarkdownRenderable, DiffRenderable, pathToFiletype } from "@opentui/core"
 import type { TextChunk, Renderable } from "@opentui/core"
-import { theme, syntaxStyle, log } from './config'
-import { agents, activeAgent, activeId, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, scanAgents, saveConversation, storeEmitter } from './store'
-import { sendMessage } from './daemon'
+import { currentWorkspaceCwd, theme, syntaxStyle, log } from './config'
+import { agents, activeAgent, activeId, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, scanAgents, saveConversation, storeEmitter, clearActiveConversation } from './store'
+import { sendMessage, resetActiveAgentToBoilerplate } from './daemon'
 
 function makeDebouncedUpdate(fn: () => void, delay = 50) {
   let scheduled = false
@@ -37,6 +37,9 @@ let conversationBoxInstance: Renderable | null = null
 let activityBoxInstance: Renderable | null = null
 let tabsBoxInstance: Renderable | null = null
 let sidebarCollapsed = false
+let tabsMascotEyesOpen = true
+let tabsMascotBlinkTimer: ReturnType<typeof setTimeout> | null = null
+let tabsMascotBlinkResetTimer: ReturnType<typeof setTimeout> | null = null
 let activityListInstance: any = null
 let activityRefreshTimer: ReturnType<typeof setInterval> | null = null
 let activityUpdateSeq = 0
@@ -122,6 +125,71 @@ export const activityList = Box({
 } as any) as any
 
 export const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 24 })
+
+const tabsSpacer = Box({
+  id: 'tabs-spacer',
+  flexGrow: 1,
+  width: '100%',
+} as any)
+
+function makeTabsMascotContent(eyesOpen: boolean): StyledText {
+  const eye = eyesOpen ? 'o' : '-'
+  return new StyledText([
+    fg(theme.comment)(`      )
+   /\\     /\\
+  /. \\___/. \\
+  \\  ${eye}  ${eye}   /
+   \\___-___/`),
+  ])
+}
+
+const tabsMascotText = new TextRenderable(renderer, {
+  id: 'tabs-mascot-text',
+  content: makeTabsMascotContent(true),
+  selectable: false,
+})
+
+const tabsMascot = Box(
+  {
+    id: 'tabs-mascot',
+    flexDirection: 'column',
+    width: '100%',
+    paddingTop: 1,
+    paddingBottom: 1,
+  } as any,
+  tabsMascotText,
+) as any
+
+function syncTabsMascotVisibility() {
+  tabsMascot.visible = !sidebarCollapsed
+}
+
+function scheduleTabsMascotBlink() {
+  if (tabsMascotBlinkTimer) clearTimeout(tabsMascotBlinkTimer)
+  const delay = 5000 + Math.floor(Math.random() * 5001)
+  tabsMascotBlinkTimer = setTimeout(() => {
+    tabsMascotBlinkTimer = null
+    if (sidebarCollapsed) {
+      scheduleTabsMascotBlink()
+      return
+    }
+
+    tabsMascotEyesOpen = false
+    tabsMascotText.content = makeTabsMascotContent(false)
+    tabsBoxInstance?.requestRender?.()
+    renderer.requestRender()
+
+    if (tabsMascotBlinkResetTimer) clearTimeout(tabsMascotBlinkResetTimer)
+    tabsMascotBlinkResetTimer = setTimeout(() => {
+      tabsMascotBlinkResetTimer = null
+      tabsMascotEyesOpen = true
+      tabsMascotText.content = makeTabsMascotContent(true)
+      tabsBoxInstance?.requestRender?.()
+      renderer.requestRender()
+      scheduleTabsMascotBlink()
+    }, 120)
+  }, delay)
+}
 
 export const collapseBtn = new TextRenderable(renderer, {
   id: 'collapse-btn',
@@ -222,6 +290,8 @@ export const tabsBox = Box(
   },
   collapseBtn,
   tabArea,
+  tabsSpacer,
+  tabsMascot,
 )
 
 export function updateBoxTitle() {
@@ -231,13 +301,13 @@ export function updateBoxTitle() {
     if (!a) { target.title = 'Conversation'; return }
     const dot = a.isRunning ? ' ●' : ' ○'
     const pid = a.meta.pid && a.isRunning ? ` (PID ${a.meta.pid})` : ''
-    const cwd = process.env.LUNA_CWD ?? process.cwd()
+    const cwd = a.meta.cwd ?? currentWorkspaceCwd()
     target.title = `${a.meta.name}${pid}${dot}  ${cwd}`
   } catch (e) { log('updateBoxTitle error', e) }
 }
 
 function gitCwd(): string {
-  return process.env.LUNA_CWD ?? process.cwd()
+  return activeAgent()?.meta.cwd ?? currentWorkspaceCwd()
 }
 
 type GitCommandResult = {
@@ -434,10 +504,10 @@ function makeDiffRenderable(change: GitFileChange, section: GitDiffSection, sect
     const delta = ev?.scroll?.delta ?? 1
     const horizontalDelta =
       direction === 'left' || (direction === 'up' && ev?.modifiers?.shift) ? -delta
-      : direction === 'right' || (direction === 'down' && ev?.modifiers?.shift) ? delta
-      : direction === 'up' ? -delta
-      : direction === 'down' ? delta
-      : 0
+        : direction === 'right' || (direction === 'down' && ev?.modifiers?.shift) ? delta
+          : direction === 'up' ? -delta
+            : direction === 'down' ? delta
+              : 0
     if (horizontalDelta === 0) return
 
     if (scrollHorizontally(horizontalDelta)) {
@@ -625,9 +695,12 @@ export function toggleSidebar() {
     if (tb) {
       tb.width = sidebarCollapsed ? 3 : 24
     }
+    syncTabsMascotVisibility()
     collapseBtn.content = new StyledText([
       sidebarCollapsed ? fg(theme.blue)(' ◀ ') : fg(theme.comment)(' ▶ ')
     ])
+    tabsBoxInstance?.requestRender?.()
+    renderer.requestRender()
   } catch (e) { log('toggleSidebar error', e) }
 }
 
@@ -702,8 +775,9 @@ function assistantMarkdownContent(msg: { content: string; reasoning?: string; th
   return parts.join('')
 }
 
-function assistantTextContent(msg: { content: string; reasoning?: string }): string {
+function assistantTextContent(msg: { content: string; reasoning?: string }, streamFrame = ''): string {
   const parts: string[] = []
+  if (streamFrame) parts.push(streamFrame)
   if (msg.reasoning && msg.reasoning.trim()) {
     parts.push(`thinking\n${msg.reasoning.trim()}`)
   }
@@ -730,7 +804,7 @@ export function updateConversation() {
           key: `msg-${i}-assistant`,
           role: 'assistant',
           mode: isStreaming ? 'text' : 'markdown',
-          content: isStreaming ? assistantTextContent(msg) : assistantMarkdownContent(msg, false),
+          content: isStreaming ? assistantTextContent(msg, a.streamFrame) : assistantMarkdownContent(msg, false),
         })
       } else if (msg.role === 'system') {
         desired.push({
@@ -773,7 +847,6 @@ export function updateActivity() {
     if (!snapshot) return
 
     const key = activityViewFingerprint(snapshot)
-    log("updateActivity lastRenderedSnapshotKey: ", lastRenderedSnapshotKey, "new key: ", key)
     if (key === lastRenderedSnapshotKey) return
     lastRenderedSnapshotKey = key
 
@@ -879,6 +952,29 @@ export function updateTabs() {
 }
 
 export function handleSlashCommand(value: string): boolean {
+  if (value === '/clear') {
+    const clearedId = clearActiveConversation()
+    if (!clearedId) return true
+    clearConversationBlocks()
+    updateConversation()
+    updateBoxTitle()
+    updateTabs()
+    const prev = input.placeholder
+    input.placeholder = 'Conversation cleared'
+    setTimeout(() => { input.placeholder = prev }, 1500)
+    return true
+  }
+  if (value === '/reset') {
+    const resetId = resetActiveAgentToBoilerplate()
+    if (!resetId) return true
+    updateConversation()
+    updateBoxTitle()
+    updateTabs()
+    const prev = input.placeholder
+    input.placeholder = 'Agent reset to boilerplate'
+    setTimeout(() => { input.placeholder = prev }, 1500)
+    return true
+  }
   if (value === '/debug') {
     const a = activeAgent()
     const lines = [
@@ -1033,6 +1129,8 @@ export function bootUI() {
   updateConversation()
   void updateActivity()
   updateTabs()
+  syncTabsMascotVisibility()
+  scheduleTabsMascotBlink()
 
   if (!activityRefreshTimer) {
     const poll = async () => {

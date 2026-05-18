@@ -1,10 +1,25 @@
+<p align="center">
+  <img src="assets/logo.png" alt="luna logo" width="200">
+</p>
+
 # luna
 
 A coding agent harness with a terminal UI.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="luna screenshot">
+</p>
+
+## Installation
+
 ```
-bun install
-bun run dev
+bun install @jaggler3/luna-agent
+```
+
+## Usage
+
+```
+luna
 ```
 
 ## Packages
@@ -13,16 +28,3 @@ bun run dev
 | ------- | ----------- |
 | `luna-code` | Core coding agent loop with tool access |
 | `luna-gateway` | IPC layer for agent communication via stdin/stdout |
-
-## Layout
-
-The TUI is split into two panes:
-
-- **Left — Conversation**: Shows agent responses and explanations
-- **Right — Activity Pane**: Shows raw agent actions (file edits, searches, commands)
-
-## Tech
-
-- **Runtime**: bun
-- **TUI**: [opentui](https://opentui.com)
-- **Monorepo**: bun workspaces

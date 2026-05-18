@@ -14,6 +14,7 @@ export interface AgentMeta {
   name: string
   pid: number | null
   createdAt: string
+  cwd?: string
 }
 
 export interface AgentData {
@@ -23,6 +24,7 @@ export interface AgentData {
   conn: Connection | null
   isRunning: boolean
   isBusy: boolean
+  streamFrame: string
   diffLines: string[]
   namingPromise: Promise<void> | null
   animTimer: ReturnType<typeof setInterval> | null

@@ -34,6 +34,7 @@ for (const id of existing) {
 
   const data: AgentData = {
     id, meta, messages, conn, isRunning, isBusy: false,
+    streamFrame: '',
     diffLines: [],
     namingPromise: null, animTimer: null, anim: null, timeout: null,
   }

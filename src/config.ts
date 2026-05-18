@@ -1,10 +1,14 @@
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { mkdirSync, appendFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { SyntaxStyle } from '@opentui/core'
+
+const SRC_DIR = dirname(fileURLToPath(import.meta.url))
 
 export const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
 export const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
+export const APP_ROOT = resolve(SRC_DIR, '..')
 
 mkdirSync(AGENTS_DIR, { recursive: true })
 
@@ -13,6 +17,10 @@ export function log(...args: unknown[]) {
     const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`
     appendFileSync(LOG_FILE, line + '\n')
   } catch { }
+}
+
+export function currentWorkspaceCwd(): string {
+  return process.env.LUNA_CWD ?? process.cwd()
 }
 
 export const theme = {

@@ -1,9 +1,32 @@
-import { existsSync, unlinkSync } from 'node:fs'
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { connect } from 'luna-gateway'
 import type { Connection } from 'luna-gateway'
-import { log } from './config'
+import { APP_ROOT, currentWorkspaceCwd, log } from './config'
 import { agents, activeAgent, saveMeta, saveConversation, socketPath, storeEmitter } from './store'
 import type { AgentData } from './types'
+
+const BOILERPLATE_AGENT_SOURCE = `import { simpleRun } from 'luna-code'
+import { createServer } from 'luna-gateway'
+
+const transport = (process.env.LUNA_TRANSPORT as 'socket' | undefined) ?? 'stdio'
+
+const server = createServer({
+  agentId: process.env.AGENT_ID ?? 'agent',
+  transport,
+  socketPath: process.env.LUNA_SOCKET_PATH,
+  handler: async (prompt, emit) => {
+    await simpleRun(prompt, {
+      onToolCall: (name, args, diff) => emit({ type: 'tool_call', name, args, diff }),
+      onToken: (token) => emit({ type: 'token', content: token }),
+      onReasoning: (chunk) => emit({ type: 'reasoning', content: chunk }),
+    })
+    emit({ type: 'done' })
+  },
+})
+
+await server.listen()
+`
 
 // A braille breathing animation spinner for loading state
 export class BrailleBreathe {
@@ -38,6 +61,7 @@ export function checkHealth() {
         if (wasRunning && !a.isRunning) {
           log('agent died', a.id)
           if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+          a.streamFrame = ''
           if (a.anim) a.anim.free()
           if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
           if (a.conn) {
@@ -71,10 +95,19 @@ function waitForSocketFile(sockPath: string, timeout: number): Promise<void> {
 
 export async function startAgent(id: string): Promise<Connection | null> {
   log('startAgent begin', id)
-  const entrypoint = 'src/agent.ts'
+  const entrypoint = join(APP_ROOT, 'src', 'agent.ts')
   const sockPath = socketPath(id)
   
-  const meta = agents.get(id)?.meta ?? { name: 'agent', pid: null, createdAt: new Date().toISOString() }
+  const meta = agents.get(id)?.meta ?? {
+    name: 'agent',
+    pid: null,
+    createdAt: new Date().toISOString(),
+    cwd: currentWorkspaceCwd(),
+  }
+  if (!meta.cwd) {
+    meta.cwd = currentWorkspaceCwd()
+    saveMeta(id, meta)
+  }
   try { unlinkSync(sockPath) } catch { }
 
   const conn = connect({
@@ -82,6 +115,8 @@ export async function startAgent(id: string): Promise<Connection | null> {
     entrypoint,
     transport: 'socket',
     socketPath: sockPath,
+    spawnCwd: APP_ROOT,
+    workspaceCwd: meta.cwd,
   })
   log('connect() returned, child.pid:', conn.child?.pid)
 
@@ -189,16 +224,16 @@ export async function sendMessage(text: string) {
 
   const anim = new BrailleBreathe()
   a.anim = anim
+  a.streamFrame = anim.step()
   a.animTimer = setInterval(() => {
-    if (agentMsg) {
-      agentMsg.content = anim.step()
-      storeEmitter.emit('update')
-    }
+    a.streamFrame = anim.step()
+    storeEmitter.emit('update')
   }, 80)
 
   a.timeout = setTimeout(() => {
     log('sendMessage timeout')
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+    a.streamFrame = ''
     anim.free()
     storeEmitter.emit('stream-end')
     a.messages.push({ role: 'system', content: 'timed out waiting for agent', error: true })
@@ -219,22 +254,12 @@ export async function sendMessage(text: string) {
       const msg = result.value
       switch (msg.type) {
         case 'token': {
-          if (a.animTimer) {
-            clearInterval(a.animTimer); a.animTimer = null
-            anim.free()
-            agentMsg.content = ''
-          }
           storeEmitter.emit('stream-start')
           agentMsg.content += msg.content as string
           storeEmitter.emit('update')
           break
         }
         case 'reasoning': {
-          if (a.animTimer) {
-            clearInterval(a.animTimer); a.animTimer = null
-            anim.free()
-            agentMsg.content = ''
-          }
           storeEmitter.emit('stream-start')
           agentMsg.reasoning += msg.content as string
           storeEmitter.emit('update')
@@ -256,8 +281,8 @@ export async function sendMessage(text: string) {
         }
         case 'done':
           log('sendMessage done')
-          if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
-          anim.free()
+          a.streamFrame = ''
+          a.isBusy = false
           storeEmitter.emit('stream-end')
           agentMsg.thinkingExpanded = false
           saveConversation(a.id, a.messages)
@@ -265,8 +290,8 @@ export async function sendMessage(text: string) {
           return
         case 'error':
           log('sendMessage agent error:', msg.error)
-          if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
-          anim.free()
+          a.streamFrame = ''
+          a.isBusy = false
           storeEmitter.emit('stream-end')
           a.messages.push({ role: 'system', content: msg.error as string, error: true })
           saveConversation(a.id, a.messages)
@@ -275,22 +300,55 @@ export async function sendMessage(text: string) {
       }
     }
     // receive loop ended without done/error — show error
+    a.streamFrame = ''
+    a.isBusy = false
     storeEmitter.emit('stream-end')
     a.messages.push({ role: 'system', content: 'connection to agent lost', error: true })
     saveConversation(a.id, a.messages)
     storeEmitter.emit('update')
   } catch (err) {
     log('sendMessage exception:', err)
+    a.streamFrame = ''
+    a.isBusy = false
     storeEmitter.emit('stream-end')
     a.messages.push({ role: 'system', content: String(err), error: true })
     saveConversation(a.id, a.messages)
     storeEmitter.emit('update')
   } finally {
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+    a.streamFrame = ''
     anim.free()
     if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
     a.isBusy = false
     storeEmitter.emit('update')
     storeEmitter.emit('focus-input')
   }
+}
+
+export function resetActiveAgentToBoilerplate(): string | null {
+  const a = activeAgent()
+  if (!a) return null
+
+  const agentPath = join(APP_ROOT, 'src', 'agent.ts')
+  try {
+    writeFileSync(agentPath, BOILERPLATE_AGENT_SOURCE, 'utf-8')
+  } catch (err) {
+    log('resetActiveAgentToBoilerplate write failed', err)
+    return null
+  }
+
+  if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+  if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
+  if (a.anim) { a.anim.free(); a.anim = null }
+  if (a.conn) { try { a.conn.kill() } catch (e) { log('reset conn err', e) }; a.conn = null }
+  if (a.meta.pid) { try { process.kill(a.meta.pid, 'SIGKILL') } catch (e) { log('reset pid err', e) }; a.meta.pid = null; saveMeta(a.id, a.meta) }
+  try { unlinkSync(socketPath(a.id)) } catch { }
+
+  a.isRunning = false
+  a.isBusy = false
+  a.streamFrame = ''
+  storeEmitter.emit('health-checked')
+  storeEmitter.emit('update')
+  log('resetActiveAgentToBoilerplate', a.id)
+  return a.id
 }
