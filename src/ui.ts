@@ -41,6 +41,7 @@ let activityListInstance: any = null
 let activityRefreshTimer: ReturnType<typeof setInterval> | null = null
 let activityUpdateSeq = 0
 let latestGitSnapshot: GitActivitySnapshot | null = null
+let lastRenderedSnapshotKey: string | null = null
 
 // ── UI components ─────────────────────────────────────────
 
@@ -341,10 +342,68 @@ function getGitStatusStyle(status: string): string {
   return theme.comment
 }
 
+function commonIndentPrefix(a: string, b: string): string {
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  return a.slice(0, i)
+}
+
+function dedentUnifiedDiffForDisplay(diff: string): string {
+  const lines = diff.replace(/\r\n/g, '\n').split('\n')
+  const output: string[] = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line.startsWith('@@ ')) {
+      output.push(line)
+      continue
+    }
+
+    let hunkEnd = i + 1
+    while (hunkEnd < lines.length && !lines[hunkEnd].startsWith('@@ ')) {
+      hunkEnd++
+    }
+
+    const hunkLines = lines.slice(i + 1, hunkEnd)
+    let indent: string | null = null
+    for (const hunkLine of hunkLines) {
+      const marker = hunkLine[0]
+      if (marker !== ' ' && marker !== '+' && marker !== '-') continue
+      const content = hunkLine.slice(1)
+      if (!content.trim()) continue
+      const leadingWhitespace = content.match(/^[ \t]+/)?.[0] ?? ''
+      if (!leadingWhitespace) continue
+      indent = indent === null ? leadingWhitespace : commonIndentPrefix(indent, leadingWhitespace)
+      if (!indent) break
+    }
+
+    output.push(line)
+    for (const hunkLine of hunkLines) {
+      if (!indent) {
+        output.push(hunkLine)
+        continue
+      }
+
+      const marker = hunkLine[0]
+      if (marker !== ' ' && marker !== '+' && marker !== '-') {
+        output.push(hunkLine)
+        continue
+      }
+
+      const content = hunkLine.slice(1)
+      output.push(`${marker}${content.startsWith(indent) ? content.slice(indent.length) : content}`)
+    }
+
+    i = hunkEnd - 1
+  }
+
+  return output.join('\n')
+}
+
 function makeDiffRenderable(change: GitFileChange, section: GitDiffSection, sectionIndex: number) {
   const diff = new DiffRenderable(renderer, {
     id: `${makeRenderableId('activity-diff', `${change.key}-${sectionIndex}`)}-diff`,
-    diff: section.diff,
+    diff: dedentUnifiedDiffForDisplay(section.diff),
     view: 'unified',
     filetype: section.filetype,
     syntaxStyle,
@@ -360,19 +419,36 @@ function makeDiffRenderable(change: GitFileChange, section: GitDiffSection, sect
     lineNumberFg: theme.comment,
   } as any)
 
-  const code = (diff as any).leftCodeRenderable ?? (diff as any).rightCodeRenderable
-  diff.onMouseScroll = (ev: any) => {
+  const getScrollableCode = () => (diff as any).leftCodeRenderable ?? (diff as any).rightCodeRenderable
+  const scrollHorizontally = (delta: number) => {
+    const code = getScrollableCode()
+    if (!code) return false
+    code.scrollX = Math.max(0, code.scrollX + delta)
+    code.requestRender?.()
+    diff.requestRender()
+    return true
+  }
+  const handleScroll = (ev: any) => {
     const direction = ev?.scroll?.direction
-    if (!code || !direction) return
+    if (!direction) return
     const delta = ev?.scroll?.delta ?? 1
-    if (direction === 'left' || (direction === 'up' && ev?.modifiers?.shift)) {
-      code.scrollX = Math.max(0, code.scrollX - delta)
-      diff.requestRender()
-    } else if (direction === 'right' || (direction === 'down' && ev?.modifiers?.shift)) {
-      code.scrollX = Math.max(0, code.scrollX + delta)
-      diff.requestRender()
+    const horizontalDelta =
+      direction === 'left' || (direction === 'up' && ev?.modifiers?.shift) ? -delta
+      : direction === 'right' || (direction === 'down' && ev?.modifiers?.shift) ? delta
+      : direction === 'up' ? -delta
+      : direction === 'down' ? delta
+      : 0
+    if (horizontalDelta === 0) return
+
+    if (scrollHorizontally(horizontalDelta)) {
+      ev?.preventDefault?.()
+      ev?.stopPropagation?.()
     }
   }
+
+  diff.onMouseScroll = handleScroll
+  const code = getScrollableCode()
+  if (code) code.onMouseScroll = handleScroll
 
   return diff
 }
@@ -502,6 +578,22 @@ async function collectGitActivity(): Promise<GitActivitySnapshot> {
     })),
   )
   return { insideRepo: true, branchLabel, changes: nextChanges }
+}
+
+function snapshotFingerprint(snapshot: GitActivitySnapshot): string {
+  if (!snapshot.insideRepo) return 'no-repo'
+  const changesKey = snapshot.changes
+    .map(c => `${c.key}\x00${c.status}\x00${c.sections.map(s => s.diff).join('\x01')}`)
+    .join('\x02')
+  return `${snapshot.branchLabel}\x02${changesKey}`
+}
+
+function activityViewFingerprint(snapshot: GitActivitySnapshot): string {
+  const snapshotKey = snapshotFingerprint(snapshot)
+  const expandedKey = activityBlocks
+    .map(block => `${block.key}:${block.expanded ? '1' : '0'}`)
+    .join('\x02')
+  return `${snapshotKey}\x03${expandedKey}`
 }
 
 export function toggleLatestThought(index?: number) {
@@ -679,6 +771,11 @@ export function updateActivity() {
   try {
     const snapshot = latestGitSnapshot
     if (!snapshot) return
+
+    const key = activityViewFingerprint(snapshot)
+    log("updateActivity lastRenderedSnapshotKey: ", lastRenderedSnapshotKey, "new key: ", key)
+    if (key === lastRenderedSnapshotKey) return
+    lastRenderedSnapshotKey = key
 
     const { insideRepo, branchLabel, changes } = snapshot
     const previousExpanded = new Map(activityBlocks.map((block) => [block.key, block.expanded]))
