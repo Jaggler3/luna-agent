@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, StyledText, fg, bg, MarkdownRenderable, DiffRenderable, pathToFiletype } from "@opentui/core"
 import type { TextChunk, Renderable } from "@opentui/core"
 import { theme, syntaxStyle, log } from './config'
@@ -22,7 +22,7 @@ const scheduleConversationUpdate = makeDebouncedUpdate(() => {
 })
 
 const scheduleActivityUpdate = makeDebouncedUpdate(() => {
-  updateActivity()
+  void updateActivity()
 })
 
 const scheduleStatusUpdate = makeDebouncedUpdate(() => {
@@ -39,6 +39,7 @@ let tabsBoxInstance: Renderable | null = null
 let sidebarCollapsed = false
 let activityListInstance: any = null
 let activityRefreshTimer: ReturnType<typeof setInterval> | null = null
+let activityUpdateSeq = 0
 
 // ── UI components ─────────────────────────────────────────
 
@@ -237,29 +238,49 @@ function gitCwd(): string {
   return process.env.LUNA_CWD ?? process.cwd()
 }
 
-function runGit(args: string[]): string | null {
-  try {
-    return execFileSync('git', ['-C', gitCwd(), ...args], { encoding: 'utf-8' }).trimEnd()
-  } catch (err: any) {
-    if (typeof err?.stdout === 'string') return err.stdout.trimEnd()
-    return null
-  }
+type GitCommandResult = {
+  exitCode: number | null
+  stdout: string
+  stderr: string
 }
 
-function isGitRepo(): boolean {
-  return runGit(['rev-parse', '--is-inside-work-tree']) === 'true'
+function runGit(args: string[]): Promise<GitCommandResult> {
+  return new Promise((resolve) => {
+    const child = spawn('git', ['-C', gitCwd(), ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    child.on('error', () => {
+      resolve({ exitCode: null, stdout, stderr })
+    })
+    child.on('close', (exitCode: number | null) => {
+      resolve({ exitCode, stdout, stderr })
+    })
+  })
 }
 
-function getGitBranchLabel(): string | null {
-  if (!isGitRepo()) return null
-  const branch = runGit(['branch', '--show-current'])?.trim()
+function isGitRepo(result: GitCommandResult): boolean {
+  return result.exitCode === 0 && result.stdout.trim() === 'true'
+}
+
+async function getGitBranchLabel(): Promise<string | null> {
+  const [branchResult, headResult] = await Promise.all([
+    runGit(['branch', '--show-current']),
+    runGit(['rev-parse', '--short', 'HEAD']),
+  ])
+  const branch = branchResult.stdout.trim()
   if (branch) return branch
-  const detached = runGit(['rev-parse', '--short', 'HEAD'])?.trim()
+  const detached = headResult.stdout.trim()
   return detached ? `HEAD:${detached}` : 'HEAD'
 }
 
-function readGitStatus(): GitFileChange[] {
-  const raw = runGit(['status', '--porcelain=v1', '--no-renames', '-uall', '-z'])
+function parseGitStatus(raw: string): GitFileChange[] {
   if (!raw) return []
   const records = raw.split('\0').filter(Boolean)
   const changes: GitFileChange[] = []
@@ -271,13 +292,13 @@ function readGitStatus(): GitFileChange[] {
       key: path,
       path,
       status,
-      sections: buildGitFileDiffSections(path, status),
+      sections: [],
     })
   }
   return changes
 }
 
-function buildGitFileDiffSections(path: string, status: string): GitDiffSection[] {
+async function buildGitFileDiffSections(path: string, status: string): Promise<GitDiffSection[]> {
   const sections: GitDiffSection[] = []
   const filetype = pathToFiletype(path) ?? 'text'
   const staged = status[0] && status[0] !== ' ' && status[0] !== '?'
@@ -285,15 +306,15 @@ function buildGitFileDiffSections(path: string, status: string): GitDiffSection[
   const untracked = status === '??'
 
   if (staged) {
-    const stagedDiff = runGit(['diff', '--cached', '--no-color', '--', path])
-    if (stagedDiff) sections.push({ label: 'staged', diff: stagedDiff, filetype })
+    const stagedDiff = await runGit(['diff', '--cached', '--no-color', '--', path])
+    if (stagedDiff.stdout) sections.push({ label: 'staged', diff: stagedDiff.stdout, filetype })
   }
   if (untracked) {
-    const added = runGit(['diff', '--no-index', '--no-color', '--', '/dev/null', path])
-    if (added) sections.push({ label: 'untracked', diff: added, filetype })
+    const added = await runGit(['diff', '--no-index', '--no-color', '--', '/dev/null', path])
+    if (added.stdout) sections.push({ label: 'untracked', diff: added.stdout, filetype })
   } else if (unstaged) {
-    const workingDiff = runGit(['diff', '--no-color', '--', path])
-    if (workingDiff) sections.push({ label: 'working tree', diff: workingDiff, filetype })
+    const workingDiff = await runGit(['diff', '--no-color', '--', path])
+    if (workingDiff.stdout) sections.push({ label: 'working tree', diff: workingDiff.stdout, filetype })
   }
 
   return sections
@@ -447,6 +468,39 @@ function toggleActivityBlock(key: string) {
   block.box.requestRender()
   activityBoxInstance?.requestRender?.()
   renderer.requestRender()
+}
+
+type GitActivitySnapshot = {
+  insideRepo: boolean
+  branchLabel: string | null
+  changes: GitFileChange[]
+}
+
+async function collectGitActivity(): Promise<GitActivitySnapshot> {
+  const [repoResult, statusResult] = await Promise.all([
+    runGit(['rev-parse', '--is-inside-work-tree']),
+    runGit(['status', '--porcelain=v1', '--no-renames', '-uall', '-z']),
+  ])
+
+  if (!isGitRepo(repoResult)) {
+    return { insideRepo: false, branchLabel: null, changes: [] }
+  }
+
+  const changes = parseGitStatus(statusResult.stdout)
+  const branchLabel = await getGitBranchLabel()
+
+  if (changes.length === 0) {
+    return { insideRepo: true, branchLabel, changes: [] }
+  }
+
+  const nextChanges = await Promise.all(
+    changes.map(async (change) => ({
+      ...change,
+      sections: await buildGitFileDiffSections(change.path, change.status),
+    })),
+  )
+
+  return { insideRepo: true, branchLabel, changes: nextChanges }
 }
 
 export function toggleLatestThought(index?: number) {
@@ -620,9 +674,13 @@ export function updateConversation() {
   } catch (e) { log('updateConversation error', e) }
 }
 
-export function updateActivity() {
+export async function updateActivity() {
   try {
-    const insideRepo = isGitRepo()
+    const updateSeq = ++activityUpdateSeq
+    const snapshot = await collectGitActivity()
+    if (updateSeq !== activityUpdateSeq) return
+
+    const { insideRepo, branchLabel, changes } = snapshot
     const previousExpanded = new Map(activityBlocks.map((block) => [block.key, block.expanded]))
     const list = (activityListInstance ?? activityList) as unknown as { add(c: unknown): void; remove(id: string): void }
     for (const block of activityBlocks) list.remove(block.boxId)
@@ -632,13 +690,12 @@ export function updateActivity() {
       const target = activityBoxInstance as unknown as { visible: boolean; width: number; title: string }
       target.visible = insideRepo
       target.width = insideRepo ? 42 : 0
-      target.title = insideRepo ? (getGitBranchLabel() ?? '') : ''
+      target.title = insideRepo ? (branchLabel ?? '') : ''
     }
     if (!insideRepo) {
       return
     }
 
-    const changes = readGitStatus()
     if (changes.length === 0) {
       const emptyKey = '__clean__'
       const boxId = makeRenderableId('activity-clean', emptyKey)
@@ -812,7 +869,7 @@ storeEmitter.on('update', () => {
 storeEmitter.on('switch', () => {
   clearConversationBlocks()
   updateConversation()
-  updateActivity()
+  void updateActivity()
   updateBoxTitle()
   updateTabs()
   input.focus()
@@ -877,12 +934,12 @@ export function bootUI() {
 
   updateBoxTitle()
   updateConversation()
-  updateActivity()
+  void updateActivity()
   updateTabs()
 
   if (!activityRefreshTimer) {
     activityRefreshTimer = setInterval(() => {
-      updateActivity()
+      void updateActivity()
     }, 2000)
   }
 
