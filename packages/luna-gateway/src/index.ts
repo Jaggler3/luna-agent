@@ -175,17 +175,26 @@ function buildReceive(socket: Socket): () => AsyncGenerator<GatewayMessage> {
         pending = null
         return Promise.resolve({ value: undefined as any, done: true })
       },
-    } as AsyncGenerator<GatewayMessage>
+    } as unknown as AsyncGenerator<GatewayMessage>
   }
 }
 
 export async function connectSocket(socketPath: string): Promise<Connection> {
   const socket = await createSocketConnection(socketPath)
+  socket.on('error', () => {
+    // Prevent unhandled crashes from background socket issues
+  })
   return {
-    send: (message: string) => socket.write(JSON.stringify({ message }) + '\n'),
+    send: (message: string) => {
+      if (socket.writable) {
+        socket.write(JSON.stringify({ message }) + '\n')
+      }
+    },
     receive: buildReceive(socket),
     getStderr: () => '',
-    kill: () => socket.end(),
+    kill: () => {
+      try { socket.end() } catch {}
+    },
     exited: new Promise(() => {}),
     child: null,
   }
@@ -214,7 +223,11 @@ export function connect(options: ConnectionOptions): Connection {
     return {
       send(message: string) {
         connectPromise.then(
-          (socket) => socket.write(JSON.stringify({ message }) + '\n'),
+          (socket) => {
+            if (socket.writable) {
+              socket.write(JSON.stringify({ message }) + '\n')
+            }
+          },
           () => {},  // connect failed — silent drop (caller handles via receive)
         )
       },
@@ -226,6 +239,9 @@ export function connect(options: ConnectionOptions): Connection {
 
         connectPromise.then(
           (s) => {
+            s.on('error', () => {
+              // Prevent unhandled socket exceptions on the connection
+            })
             const rl = createInterface({ input: s })
             rl.on('line', (line: string) => {
               if (pending) {
@@ -264,7 +280,7 @@ export function connect(options: ConnectionOptions): Connection {
             pending = null
             return Promise.resolve({ value: undefined as any, done: true })
           },
-        } as AsyncGenerator<GatewayMessage>
+        } as unknown as AsyncGenerator<GatewayMessage>
       },
       getStderr: () => '',
       kill: () => child.kill(),
@@ -337,7 +353,7 @@ export function connect(options: ConnectionOptions): Connection {
         pending = null
         return Promise.resolve({ value: undefined as any, done: true })
       },
-    } as AsyncGenerator<GatewayMessage>
+    } as unknown as AsyncGenerator<GatewayMessage>
   }
 
   function getStderr(): string {

@@ -1,6 +1,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { exec } from 'node:child_process'
+import { promisify } from 'node:util'
 import { join } from 'node:path'
+
+const execAsync = promisify(exec)
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434'
 const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:20b-cloud'
@@ -291,21 +294,30 @@ async function executeTool(tc: ToolCall): Promise<string> {
       }
       case 'edit_file': {
         const fullPath = resolvePath(args.path)
-        let content = readFileSync(fullPath, 'utf-8')
-        if (!content.includes(args.oldString)) {
+        const content = readFileSync(fullPath, 'utf-8')
+        const occurrences = content.split(args.oldString).length - 1
+        if (occurrences === 0) {
           throw new Error(`oldString not found in ${args.path}`)
         }
-        content = content.replace(args.oldString, args.newString)
-        writeFileSync(fullPath, content, 'utf-8')
+        if (occurrences > 1) {
+          throw new Error(`oldString is not unique! Found ${occurrences} occurrences in ${args.path}. Please provide a larger block of unique context.`)
+        }
+        const updated = content.replace(args.oldString, args.newString)
+        writeFileSync(fullPath, updated, 'utf-8')
         return `edited ${args.path}`
       }
       case 'bash': {
-        const output = execSync(args.command, {
-          cwd: CWD,
-          encoding: 'utf-8',
-          maxBuffer: 10 * 1024 * 1024,
-        })
-        return output || '(no output)'
+        try {
+          const { stdout, stderr } = await execAsync(args.command, {
+            cwd: CWD,
+            maxBuffer: 10 * 1024 * 1024,
+          })
+          return stdout || stderr || '(no output)'
+        } catch (err: any) {
+          const out = err.stdout ? `stdout:\n${err.stdout}` : ''
+          const errorText = err.stderr ? `stderr:\n${err.stderr}` : ''
+          return `command failed with exit code ${err.code || 1}\n${out}\n${errorText}`.trim()
+        }
       }
       case 'glob': {
         const g = new Bun.Glob(args.pattern)
