@@ -40,6 +40,7 @@ let sidebarCollapsed = false
 let activityListInstance: any = null
 let activityRefreshTimer: ReturnType<typeof setInterval> | null = null
 let activityUpdateSeq = 0
+let latestGitSnapshot: GitActivitySnapshot | null = null
 
 // ── UI components ─────────────────────────────────────────
 
@@ -468,6 +469,7 @@ function toggleActivityBlock(key: string) {
   block.box.requestRender()
   activityBoxInstance?.requestRender?.()
   renderer.requestRender()
+  updateActivity()
 }
 
 type GitActivitySnapshot = {
@@ -499,7 +501,6 @@ async function collectGitActivity(): Promise<GitActivitySnapshot> {
       sections: await buildGitFileDiffSections(change.path, change.status),
     })),
   )
-
   return { insideRepo: true, branchLabel, changes: nextChanges }
 }
 
@@ -674,11 +675,10 @@ export function updateConversation() {
   } catch (e) { log('updateConversation error', e) }
 }
 
-export async function updateActivity() {
+export function updateActivity() {
   try {
-    const updateSeq = ++activityUpdateSeq
-    const snapshot = await collectGitActivity()
-    if (updateSeq !== activityUpdateSeq) return
+    const snapshot = latestGitSnapshot
+    if (!snapshot) return
 
     const { insideRepo, branchLabel, changes } = snapshot
     const previousExpanded = new Map(activityBlocks.map((block) => [block.key, block.expanded]))
@@ -938,9 +938,12 @@ export function bootUI() {
   updateTabs()
 
   if (!activityRefreshTimer) {
-    activityRefreshTimer = setInterval(() => {
-      void updateActivity()
-    }, 2000)
+    const poll = async () => {
+      latestGitSnapshot = await collectGitActivity()
+      updateActivity()
+    }
+    void poll()
+    activityRefreshTimer = setInterval(() => { void poll() }, 1000)
   }
 
 }
