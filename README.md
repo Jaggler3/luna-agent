@@ -13,7 +13,7 @@ A coding agent harness with a terminal UI.
 ## Installation
 
 ```
-bun install @jaggler3/luna-agent
+bun install -g @jaggler3/luna-agent
 ```
 
 ## Usage
