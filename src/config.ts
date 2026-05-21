@@ -9,6 +9,13 @@ const SRC_DIR = dirname(fileURLToPath(import.meta.url))
 export const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
 export const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 export const APP_ROOT = resolve(SRC_DIR, '..')
+export const DEFAULT_AGENT_TIMEOUT_MS = 120_000
+export const AGENT_TIMEOUT_MS = (() => {
+  const raw = process.env.LUNA_AGENT_TIMEOUT_MS
+  if (!raw) return DEFAULT_AGENT_TIMEOUT_MS
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AGENT_TIMEOUT_MS
+})()
 
 mkdirSync(AGENTS_DIR, { recursive: true })
 

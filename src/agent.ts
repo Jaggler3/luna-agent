@@ -10,6 +10,7 @@ const server = createServer({
   handler: async (prompt, emit) => {
     await simpleRun(prompt, {
       onToolCall: (name, args, diff) => emit({ type: 'tool_call', name, args, diff }),
+      onToolResult: (name, result, toolCallId) => emit({ type: 'tool_result', name, result, toolCallId }),
       onToken: (token) => emit({ type: 'token', content: token }),
       onReasoning: (chunk) => emit({ type: 'reasoning', content: chunk }),
     })

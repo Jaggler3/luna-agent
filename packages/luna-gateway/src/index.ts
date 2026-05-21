@@ -5,7 +5,13 @@ import { createServer as createNetServer, createConnection } from 'node:net'
 import type { Socket } from 'node:net'
 import { unlinkSync } from 'node:fs'
 
-export type GatewayMessage = Record<string, unknown>
+export type GatewayMessage =
+  | { type: 'token'; content: string }
+  | { type: 'reasoning'; content: string }
+  | { type: 'tool_call'; name: string; args: string; diff?: string }
+  | { type: 'tool_result'; name: string; result: string; toolCallId?: string }
+  | { type: 'done' }
+  | { type: 'error'; error: string }
 
 export interface ServerOptions {
   agentId: string
@@ -139,46 +145,94 @@ function createSocketConnection(socketPath: string): Promise<Socket> {
   })
 }
 
-function buildReceive(socket: Socket): () => AsyncGenerator<GatewayMessage> {
-  return function (): AsyncGenerator<GatewayMessage> {
-    const buffer: string[] = []
-    let pending: ((value: IteratorResult<GatewayMessage>) => void) | null = null
-    let closed = false
+function parseGatewayMessage(line: string): GatewayMessage {
+  try {
+    const parsed = JSON.parse(line)
+    if (isGatewayMessage(parsed)) {
+      return parsed
+    }
+  } catch {}
+  return { type: 'error', error: line }
+}
 
-    const rl = createInterface({ input: socket })
-    rl.on('line', (line: string) => {
-      if (pending) {
-        const p = pending
-        pending = null
-        try { p({ value: JSON.parse(line), done: false }) }
-        catch { p({ value: { type: 'error', error: line }, done: false }) }
-      } else {
-        buffer.push(line)
-      }
-    })
+function isGatewayMessage(value: unknown): value is GatewayMessage {
+  if (!value || typeof value !== 'object') return false
+  const msg = value as Record<string, unknown>
+  switch (msg.type) {
+    case 'token':
+    case 'reasoning':
+      return typeof msg.content === 'string'
+    case 'tool_call':
+      return typeof msg.name === 'string'
+        && typeof msg.args === 'string'
+        && (msg.diff === undefined || typeof msg.diff === 'string')
+    case 'tool_result':
+      return typeof msg.name === 'string'
+        && typeof msg.result === 'string'
+        && (msg.toolCallId === undefined || typeof msg.toolCallId === 'string')
+    case 'done':
+      return true
+    case 'error':
+      return typeof msg.error === 'string'
+    default:
+      return false
+  }
+}
 
-    rl.on('close', () => {
-      closed = true
-      if (pending) pending({ value: undefined as any, done: true })
-    })
+function createReceiveQueue(): {
+  pushLine: (line: string) => void
+  close: () => void
+  receive: () => AsyncGenerator<GatewayMessage>
+} {
+  const buffer: GatewayMessage[] = []
+  const waiters: Array<(value: IteratorResult<GatewayMessage>) => void> = []
+  let closed = false
 
+  function push(value: GatewayMessage) {
+    const waiter = waiters.shift()
+    if (waiter) {
+      waiter({ value, done: false })
+    } else {
+      buffer.push(value)
+    }
+  }
+
+  function close() {
+    closed = true
+    while (waiters.length > 0) {
+      waiters.shift()?.({ value: undefined as any, done: true })
+    }
+  }
+
+  function receive(): AsyncGenerator<GatewayMessage> {
     return {
       [Symbol.asyncIterator]() { return this },
       next(): Promise<IteratorResult<GatewayMessage>> {
         if (buffer.length > 0) {
-          const line = buffer.shift()!
-          try { return Promise.resolve({ value: JSON.parse(line), done: false }) }
-          catch { return Promise.resolve({ value: { type: 'error', error: line }, done: false }) }
+          return Promise.resolve({ value: buffer.shift()!, done: false })
         }
         if (closed) return Promise.resolve({ value: undefined as any, done: true })
-        return new Promise((resolve) => { pending = resolve })
+        return new Promise((resolve) => { waiters.push(resolve) })
       },
       return(): Promise<IteratorResult<GatewayMessage>> {
-        pending = null
         return Promise.resolve({ value: undefined as any, done: true })
       },
     } as unknown as AsyncGenerator<GatewayMessage>
   }
+
+  return {
+    pushLine: (line) => push(parseGatewayMessage(line)),
+    close,
+    receive,
+  }
+}
+
+function buildReceive(socket: Socket): () => AsyncGenerator<GatewayMessage> {
+  const queue = createReceiveQueue()
+  const rl = createInterface({ input: socket })
+  rl.on('line', queue.pushLine)
+  rl.on('close', queue.close)
+  return queue.receive
 }
 
 export async function connectSocket(socketPath: string): Promise<Connection> {
@@ -222,12 +276,18 @@ export function connect(options: ConnectionOptions): Connection {
     child.unref()
 
     const connectPromise = waitForSocket(socketPath).then(() => createSocketConnection(socketPath))
-
-    // On connection failure, close the receive stream so the consumer isn't stuck forever
-    const onConnFail = () => {
-      // The send/receive .then callbacks never ran, so the consumer is stuck.
-      // We flag an error via closed=true so next() returns done.
-    }
+    const queue = createReceiveQueue()
+    connectPromise.then(
+      (socket) => {
+        socket.on('error', () => {
+          // Prevent unhandled socket exceptions on the connection
+        })
+        const rl = createInterface({ input: socket })
+        rl.on('line', queue.pushLine)
+        rl.on('close', queue.close)
+      },
+      () => queue.close(),
+    )
 
     return {
       send(message: string) {
@@ -240,57 +300,7 @@ export function connect(options: ConnectionOptions): Connection {
           () => {},  // connect failed — silent drop (caller handles via receive)
         )
       },
-      receive() {
-        const buffer: string[] = []
-        let pending: ((value: IteratorResult<GatewayMessage>) => void) | null = null
-        let closed = false
-        let connFailed = false
-
-        connectPromise.then(
-          (s) => {
-            s.on('error', () => {
-              // Prevent unhandled socket exceptions on the connection
-            })
-            const rl = createInterface({ input: s })
-            rl.on('line', (line: string) => {
-              if (pending) {
-                const p = pending
-                pending = null
-                try { p({ value: JSON.parse(line), done: false }) }
-                catch { p({ value: { type: 'error', error: line }, done: false }) }
-              } else {
-                buffer.push(line)
-              }
-            })
-            rl.on('close', () => {
-              closed = true
-              if (pending) pending({ value: undefined as any, done: true })
-            })
-          },
-          () => {
-            connFailed = true
-            closed = true
-            if (pending) pending({ value: undefined as any, done: true })
-          },
-        )
-
-        return {
-          [Symbol.asyncIterator]() { return this },
-          next(): Promise<IteratorResult<GatewayMessage>> {
-            if (buffer.length > 0) {
-              const line = buffer.shift()!
-              try { return Promise.resolve({ value: JSON.parse(line), done: false }) }
-              catch { return Promise.resolve({ value: { type: 'error', error: line }, done: false }) }
-            }
-            if (closed) return Promise.resolve({ value: undefined as any, done: true })
-            return new Promise((resolve) => { pending = resolve })
-          },
-          return(): Promise<IteratorResult<GatewayMessage>> {
-            pending = null
-            return Promise.resolve({ value: undefined as any, done: true })
-          },
-        } as unknown as AsyncGenerator<GatewayMessage>
-      },
+      receive: queue.receive,
       getStderr: () => '',
       kill: () => child.kill(),
       exited: new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code))),
@@ -312,63 +322,15 @@ export function connect(options: ConnectionOptions): Connection {
   child.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk))
 
   const rl = createInterface({ input: child.stdout! })
+  const queue = createReceiveQueue()
+  rl.on('line', queue.pushLine)
+  rl.on('close', queue.close)
 
   function send(message: string) {
     child.stdin!.write(JSON.stringify({ message }) + '\n')
   }
 
-  function receive(): AsyncGenerator<GatewayMessage> {
-    const buffer: string[] = []
-    let pending: ((value: IteratorResult<GatewayMessage>) => void) | null = null
-    let closed = false
-
-    rl.on('line', (line: string) => {
-      if (pending) {
-        const p = pending
-        pending = null
-        try {
-          p({ value: JSON.parse(line), done: false })
-        } catch {
-          p({ value: { type: 'error', error: line }, done: false })
-        }
-      } else {
-        buffer.push(line)
-      }
-    })
-
-    rl.on('close', () => {
-      closed = true
-      if (pending) {
-        pending({ value: undefined as any, done: true })
-      }
-    })
-
-    return {
-      [Symbol.asyncIterator]() {
-        return this
-      },
-      next(): Promise<IteratorResult<GatewayMessage>> {
-        if (buffer.length > 0) {
-          const line = buffer.shift()!
-          try {
-            return Promise.resolve({ value: JSON.parse(line), done: false })
-          } catch {
-            return Promise.resolve({ value: { type: 'error', error: line }, done: false })
-          }
-        }
-        if (closed) {
-          return Promise.resolve({ value: undefined as any, done: true })
-        }
-        return new Promise((resolve) => {
-          pending = resolve
-        })
-      },
-      return(): Promise<IteratorResult<GatewayMessage>> {
-        pending = null
-        return Promise.resolve({ value: undefined as any, done: true })
-      },
-    } as unknown as AsyncGenerator<GatewayMessage>
-  }
+  const receive = queue.receive
 
   function getStderr(): string {
     return Buffer.concat(stderrChunks).toString()

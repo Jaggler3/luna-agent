@@ -2,7 +2,7 @@ import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { connect } from 'luna-gateway'
 import type { Connection } from 'luna-gateway'
-import { APP_ROOT, currentWorkspaceCwd, log } from './config'
+import { AGENT_TIMEOUT_MS, APP_ROOT, currentWorkspaceCwd, log } from './config'
 import { agents, activeAgent, saveMeta, saveConversation, socketPath, storeEmitter } from './store'
 import type { AgentData } from './types'
 
@@ -18,6 +18,7 @@ const server = createServer({
   handler: async (prompt, emit) => {
     await simpleRun(prompt, {
       onToolCall: (name, args, diff) => emit({ type: 'tool_call', name, args, diff }),
+      onToolResult: (name, result, toolCallId) => emit({ type: 'tool_result', name, result, toolCallId }),
       onToken: (token) => emit({ type: 'token', content: token }),
       onReasoning: (chunk) => emit({ type: 'reasoning', content: chunk }),
     })
@@ -204,6 +205,18 @@ function summarizeToolArgs(name: string, args: string): string {
   }
 }
 
+function summarizeToolResult(result: string): string {
+  const singleLine = result.replace(/\s+/g, ' ').trim()
+  return singleLine.length > 360 ? `${singleLine.slice(0, 360)}...` : singleLine
+}
+
+function timeoutForAgent(a: AgentData): number {
+  const timeoutMs = a.meta.timeoutMs
+  return typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : AGENT_TIMEOUT_MS
+}
+
 export async function sendMessage(text: string) {
   const a = activeAgent()
   log('sendMessage', text.slice(0, 50), 'agent:', a?.id, 'busy:', a?.isBusy)
@@ -256,18 +269,19 @@ export async function sendMessage(text: string) {
     storeEmitter.emit('update')
   }, 80)
 
+  const timeoutMs = timeoutForAgent(a)
   a.timeout = setTimeout(() => {
     log('sendMessage timeout')
     if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
     a.streamFrame = ''
     anim.free()
     storeEmitter.emit('stream-end')
-    a.messages.push({ role: 'system', content: 'timed out waiting for agent', error: true })
+    a.messages.push({ role: 'system', content: `timed out waiting for agent after ${timeoutMs}ms`, error: true })
     saveConversation(a.id, a.messages)
     a.isBusy = false
     storeEmitter.emit('update')
     storeEmitter.emit('focus-input')
-  }, 120_000)
+  }, timeoutMs)
 
   const iter = a.conn.receive()
   try {
@@ -292,9 +306,9 @@ export async function sendMessage(text: string) {
           break
         }
         case 'tool_call': {
-          const name = msg.name as string
-          const diff = msg.diff as string | undefined
-          const args = msg.args as string
+          const name = msg.name
+          const diff = msg.diff
+          const args = msg.args
           let parsed: any = {}
           try { parsed = JSON.parse(args) } catch { }
 
@@ -304,6 +318,11 @@ export async function sendMessage(text: string) {
           } else {
             a.diffLines.push(`› ${name}: ${summarizeToolArgs(name, args)}`)
           }
+          storeEmitter.emit('activity-updated')
+          break
+        }
+        case 'tool_result': {
+          a.diffLines.push(`‹ ${msg.name}: ${summarizeToolResult(msg.result)}`)
           storeEmitter.emit('activity-updated')
           break
         }

@@ -15,6 +15,7 @@ export interface AgentMeta {
   pid: number | null
   createdAt: string
   cwd?: string
+  timeoutMs?: number
 }
 
 export interface AgentData {

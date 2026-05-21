@@ -570,6 +570,7 @@ async function executeTool(tc: ToolCall): Promise<string> {
 
 export interface SimpleRunCallbacks {
   onToolCall?: (name: string, args: string, diff?: string) => void
+  onToolResult?: (name: string, result: string, toolCallId: string) => void
   onToken?: (token: string) => void
   onReasoning?: (chunk: string) => void
 }
@@ -638,6 +639,7 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
 
         callbacks?.onToolCall?.(tc.function.name, tc.function.arguments, diff)
         const result = truncateToolResult(await executeTool(tc))
+        callbacks?.onToolResult?.(tc.function.name, result, tc.id)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
         executedToolCount++
       }
