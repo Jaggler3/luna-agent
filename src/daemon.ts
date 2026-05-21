@@ -178,6 +178,30 @@ export async function deriveConversationName(prompt: string): Promise<string | n
   } catch { return null }
 }
 
+function summarizeToolArgs(name: string, args: string): string {
+  let parsed: any = null
+  try { parsed = JSON.parse(args) } catch { }
+  if (!parsed || typeof parsed !== 'object') return args.slice(0, 240)
+
+  switch (name) {
+    case 'read_file':
+      return String(parsed.path ?? '')
+    case 'glob':
+      return String(parsed.pattern ?? '')
+    case 'grep': {
+      const include = parsed.include ? ` in ${parsed.include}` : ''
+      return `${String(parsed.pattern ?? '')}${include}`
+    }
+    case 'bash':
+      return String(parsed.command ?? '').slice(0, 240)
+    case 'write_file':
+    case 'edit_file':
+      return String(parsed.path ?? '')
+    default:
+      return JSON.stringify(parsed).slice(0, 240)
+  }
+}
+
 export async function sendMessage(text: string) {
   const a = activeAgent()
   log('sendMessage', text.slice(0, 50), 'agent:', a?.id, 'busy:', a?.isBusy)
@@ -275,8 +299,10 @@ export async function sendMessage(text: string) {
           if ((name === 'write_file' || name === 'edit_file') && diff) {
             const path = parsed.path || ''
             a.diffLines.push(`✎ ${path}\n---\n${diff}`)
-            storeEmitter.emit('activity-updated')
+          } else {
+            a.diffLines.push(`› ${name}: ${summarizeToolArgs(name, args)}`)
           }
+          storeEmitter.emit('activity-updated')
           break
         }
         case 'done':

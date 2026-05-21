@@ -1,9 +1,13 @@
-import { spawn } from 'node:child_process'
-import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, StyledText, fg, bg, MarkdownRenderable, DiffRenderable, pathToFiletype } from "@opentui/core"
+import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, InputRenderable, StyledText, fg, bg, MarkdownRenderable, DiffRenderable } from "@opentui/core"
 import type { TextChunk, Renderable } from "@opentui/core"
 import { currentWorkspaceCwd, theme, syntaxStyle, log } from './config'
 import { agents, activeAgent, activeId, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, scanAgents, saveConversation, storeEmitter, clearActiveConversation } from './store'
 import { sendMessage, resetActiveAgentToBoilerplate } from './daemon'
+import { generateCommitDraft } from './commit-message'
+import { commitAllChanges, pushChanges as gitPushChanges } from './git-actions'
+import { activityViewFingerprint as gitActivityViewFingerprint, collectGitActivity as collectGitActivitySnapshot } from './git-activity'
+import type { GitActivitySnapshot, GitDiffSection, GitFileChange } from './git-activity'
+import { dedentUnifiedDiffForDisplay } from './diff-display'
 
 function makeDebouncedUpdate(fn: () => void, delay = 50) {
   let scheduled = false
@@ -45,6 +49,8 @@ let activityRefreshTimer: ReturnType<typeof setInterval> | null = null
 let activityUpdateSeq = 0
 let latestGitSnapshot: GitActivitySnapshot | null = null
 let lastRenderedSnapshotKey: string | null = null
+let commitNameInput: InputRenderable | null = null
+let commitBodyInput: TextareaRenderable | null = null
 
 // ── UI components ─────────────────────────────────────────
 
@@ -78,19 +84,6 @@ export const conversationList = Box({
 } as any) as any
 
 let conversationListInstance: any = null
-
-type GitFileChange = {
-  key: string
-  path: string
-  status: string
-  sections: GitDiffSection[]
-}
-
-type GitDiffSection = {
-  label: string
-  diff: string
-  filetype: string
-}
 
 type GitActivityBlock = {
   key: string
@@ -268,14 +261,23 @@ export const activityBox = Box(
     padding: 1,
     gap: 1,
   } as any,
-  ScrollBox(
+  Box(
     {
       flexGrow: 1,
-      stickyScroll: true,
-      stickyStart: "bottom",
-      scrollY: true,
-    },
-    activityList,
+      flexDirection: 'column',
+      width: '100%',
+      gap: 1,
+    } as any,
+    ScrollBox(
+      {
+        flexGrow: 1,
+        stickyScroll: true,
+        stickyStart: "bottom",
+        scrollY: true,
+      },
+      activityList,
+    ),
+    makeCommitFooter(),
   ),
 ) as any
 
@@ -310,88 +312,6 @@ function gitCwd(): string {
   return activeAgent()?.meta.cwd ?? currentWorkspaceCwd()
 }
 
-type GitCommandResult = {
-  exitCode: number | null
-  stdout: string
-  stderr: string
-}
-
-function runGit(args: string[]): Promise<GitCommandResult> {
-  return new Promise((resolve) => {
-    const child = spawn('git', ['-C', gitCwd(), ...args], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk: string) => { stderr += chunk })
-    child.on('error', () => {
-      resolve({ exitCode: null, stdout, stderr })
-    })
-    child.on('close', (exitCode: number | null) => {
-      resolve({ exitCode, stdout, stderr })
-    })
-  })
-}
-
-function isGitRepo(result: GitCommandResult): boolean {
-  return result.exitCode === 0 && result.stdout.trim() === 'true'
-}
-
-async function getGitBranchLabel(): Promise<string | null> {
-  const [branchResult, headResult] = await Promise.all([
-    runGit(['branch', '--show-current']),
-    runGit(['rev-parse', '--short', 'HEAD']),
-  ])
-  const branch = branchResult.stdout.trim()
-  if (branch) return branch
-  const detached = headResult.stdout.trim()
-  return detached ? `HEAD:${detached}` : 'HEAD'
-}
-
-function parseGitStatus(raw: string): GitFileChange[] {
-  if (!raw) return []
-  const records = raw.split('\0').filter(Boolean)
-  const changes: GitFileChange[] = []
-  for (const record of records) {
-    const status = record.slice(0, 2)
-    const path = record.slice(3)
-    if (!path) continue
-    changes.push({
-      key: path,
-      path,
-      status,
-      sections: [],
-    })
-  }
-  return changes
-}
-
-async function buildGitFileDiffSections(path: string, status: string): Promise<GitDiffSection[]> {
-  const sections: GitDiffSection[] = []
-  const filetype = pathToFiletype(path) ?? 'text'
-  const staged = status[0] && status[0] !== ' ' && status[0] !== '?'
-  const unstaged = status[1] && status[1] !== ' '
-  const untracked = status === '??'
-
-  if (staged) {
-    const stagedDiff = await runGit(['diff', '--cached', '--no-color', '--', path])
-    if (stagedDiff.stdout) sections.push({ label: 'staged', diff: stagedDiff.stdout, filetype })
-  }
-  if (untracked) {
-    const added = await runGit(['diff', '--no-index', '--no-color', '--', '/dev/null', path])
-    if (added.stdout) sections.push({ label: 'untracked', diff: added.stdout, filetype })
-  } else if (unstaged) {
-    const workingDiff = await runGit(['diff', '--no-color', '--', path])
-    if (workingDiff.stdout) sections.push({ label: 'working tree', diff: workingDiff.stdout, filetype })
-  }
-
-  return sections
-}
-
 function makeActivityHeader(change: GitFileChange, expanded: boolean): StyledText {
   const arrow = expanded ? '▼' : '▶'
   const status = change.status.trim()
@@ -410,64 +330,6 @@ function getGitStatusStyle(status: string): string {
   if (status.includes('C')) return theme.cyan
   if (status.includes('U')) return theme.red
   return theme.comment
-}
-
-function commonIndentPrefix(a: string, b: string): string {
-  let i = 0
-  while (i < a.length && i < b.length && a[i] === b[i]) i++
-  return a.slice(0, i)
-}
-
-function dedentUnifiedDiffForDisplay(diff: string): string {
-  const lines = diff.replace(/\r\n/g, '\n').split('\n')
-  const output: string[] = []
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (!line.startsWith('@@ ')) {
-      output.push(line)
-      continue
-    }
-
-    let hunkEnd = i + 1
-    while (hunkEnd < lines.length && !lines[hunkEnd].startsWith('@@ ')) {
-      hunkEnd++
-    }
-
-    const hunkLines = lines.slice(i + 1, hunkEnd)
-    let indent: string | null = null
-    for (const hunkLine of hunkLines) {
-      const marker = hunkLine[0]
-      if (marker !== ' ' && marker !== '+' && marker !== '-') continue
-      const content = hunkLine.slice(1)
-      if (!content.trim()) continue
-      const leadingWhitespace = content.match(/^[ \t]+/)?.[0] ?? ''
-      if (!leadingWhitespace) continue
-      indent = indent === null ? leadingWhitespace : commonIndentPrefix(indent, leadingWhitespace)
-      if (!indent) break
-    }
-
-    output.push(line)
-    for (const hunkLine of hunkLines) {
-      if (!indent) {
-        output.push(hunkLine)
-        continue
-      }
-
-      const marker = hunkLine[0]
-      if (marker !== ' ' && marker !== '+' && marker !== '-') {
-        output.push(hunkLine)
-        continue
-      }
-
-      const content = hunkLine.slice(1)
-      output.push(`${marker}${content.startsWith(indent) ? content.slice(indent.length) : content}`)
-    }
-
-    i = hunkEnd - 1
-  }
-
-  return output.join('\n')
 }
 
 function makeDiffRenderable(change: GitFileChange, section: GitDiffSection, sectionIndex: number) {
@@ -521,6 +383,132 @@ function makeDiffRenderable(change: GitFileChange, section: GitDiffSection, sect
   if (code) code.onMouseScroll = handleScroll
 
   return diff
+}
+
+function makeFooterButton(id: string, label: string, color: string, onClick: () => void) {
+  const button = new TextRenderable(renderer, {
+    id,
+    content: new StyledText([bg(theme.bgHighlight)(fg(color)(` ${label} `))]),
+    selectable: false,
+  })
+  button.onMouseDown = (ev: { button: number }) => {
+    if (ev.button === 0) onClick()
+  }
+  return button
+}
+
+function makeSparkleButton(onClick: () => void) {
+  return makeFooterButton('commit-generate', '✨', theme.green, onClick)
+}
+
+async function generateCommitSummary() {
+  const snapshot = latestGitSnapshot
+  if (!snapshot || snapshot.changes.length === 0) {
+    log('generate commit summary ignored: no git changes')
+    return
+  }
+
+  const draft = await generateCommitDraft(snapshot, { log })
+  if (commitNameInput) commitNameInput.value = draft.title
+  if (commitBodyInput) commitBodyInput.setText(draft.body)
+  commitNameInput?.focus()
+  commitNameInput?.requestRender?.()
+  commitBodyInput?.requestRender?.()
+  renderer.requestRender()
+}
+
+async function commitChanges() {
+  const name = commitNameInput?.plainText.trim() ?? ''
+  const body = commitBodyInput?.plainText.trim() ?? ''
+  if (!name) {
+    log('commit ignored: empty commit name')
+    return
+  }
+
+  const commitResult = await commitAllChanges(gitCwd(), name, body)
+  if (commitResult.exitCode !== 0) {
+    log('git commit failed', commitResult.stderr || commitResult.stdout)
+    return
+  }
+
+  if (commitNameInput) commitNameInput.value = ''
+  commitBodyInput?.setText('')
+  commitNameInput?.requestRender?.()
+  commitBodyInput?.requestRender?.()
+  latestGitSnapshot = await collectGitActivitySnapshot(gitCwd())
+  updateActivity()
+  log('git commit complete')
+}
+
+async function pushChanges() {
+  const result = await gitPushChanges(gitCwd())
+  if (result.exitCode !== 0) {
+    log('git push failed', result.stderr || result.stdout)
+    return
+  }
+
+  log('git push complete')
+}
+
+function makeCommitFooter() {
+  commitNameInput = new InputRenderable(renderer, {
+    id: 'commit-name-input',
+    placeholder: 'Commit name',
+    backgroundColor: theme.bgHighlight,
+    focusedBackgroundColor: theme.bgHighlight,
+    textColor: theme.fg,
+    focusedTextColor: theme.fg,
+    cursorColor: theme.blue,
+    maxLength: 120,
+    flexGrow: 1,
+  })
+
+  commitBodyInput = new TextareaRenderable(renderer, {
+    id: 'commit-body-input',
+    placeholder: 'Commit body',
+    backgroundColor: theme.bgHighlight,
+    focusedBackgroundColor: theme.bgHighlight,
+    textColor: theme.fg,
+    focusedTextColor: theme.fg,
+    cursorColor: theme.blue,
+    wrapMode: 'word',
+    height: 4,
+    minHeight: 4,
+    width: '100%',
+  })
+
+  const generateButton = makeSparkleButton(() => { void generateCommitSummary() })
+  const commitButton = makeFooterButton('commit-button', 'Commit', theme.blue, () => { void commitChanges() })
+  const pushButton = makeFooterButton('push-button', 'Push', theme.cyan, () => { void pushChanges() })
+
+  return Box(
+    {
+      id: 'commit-footer',
+      flexDirection: 'column',
+      gap: 1,
+      width: '100%',
+    } as any,
+    Box(
+      {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 1,
+        width: '100%',
+      } as any,
+      commitNameInput,
+      generateButton,
+    ),
+    commitBodyInput,
+    Box(
+      {
+        flexDirection: 'row',
+        gap: 1,
+        width: '100%',
+      } as any,
+      commitButton,
+      pushButton,
+    ),
+  ) as any
 }
 
 function makeActivitySectionBlock(change: GitFileChange, section: GitDiffSection, sectionIndex: number) {
@@ -618,52 +606,11 @@ function toggleActivityBlock(key: string) {
   updateActivity()
 }
 
-type GitActivitySnapshot = {
-  insideRepo: boolean
-  branchLabel: string | null
-  changes: GitFileChange[]
-}
-
-async function collectGitActivity(): Promise<GitActivitySnapshot> {
-  const [repoResult, statusResult] = await Promise.all([
-    runGit(['rev-parse', '--is-inside-work-tree']),
-    runGit(['status', '--porcelain=v1', '--no-renames', '-uall', '-z']),
-  ])
-
-  if (!isGitRepo(repoResult)) {
-    return { insideRepo: false, branchLabel: null, changes: [] }
-  }
-
-  const changes = parseGitStatus(statusResult.stdout)
-  const branchLabel = await getGitBranchLabel()
-
-  if (changes.length === 0) {
-    return { insideRepo: true, branchLabel, changes: [] }
-  }
-
-  const nextChanges = await Promise.all(
-    changes.map(async (change) => ({
-      ...change,
-      sections: await buildGitFileDiffSections(change.path, change.status),
-    })),
-  )
-  return { insideRepo: true, branchLabel, changes: nextChanges }
-}
-
-function snapshotFingerprint(snapshot: GitActivitySnapshot): string {
-  if (!snapshot.insideRepo) return 'no-repo'
-  const changesKey = snapshot.changes
-    .map(c => `${c.key}\x00${c.status}\x00${c.sections.map(s => s.diff).join('\x01')}`)
-    .join('\x02')
-  return `${snapshot.branchLabel}\x02${changesKey}`
-}
-
 function activityViewFingerprint(snapshot: GitActivitySnapshot): string {
-  const snapshotKey = snapshotFingerprint(snapshot)
   const expandedKey = activityBlocks
     .map(block => `${block.key}:${block.expanded ? '1' : '0'}`)
     .join('\x02')
-  return `${snapshotKey}\x03${expandedKey}`
+  return gitActivityViewFingerprint(snapshot, expandedKey)
 }
 
 export function toggleLatestThought(index?: number) {
@@ -765,7 +712,7 @@ function assistantMarkdownContent(msg: { content: string; reasoning?: string; th
   const parts: string[] = []
   if (msg.reasoning && msg.reasoning.trim()) {
     if (isStreaming || msg.thinkingExpanded) {
-      parts.push(`> [!NOTE]\n> **Thinking Process:**\n> ${msg.reasoning.trim().replace(/\n/g, '\n> ')}`)
+      parts.push(`> ${msg.reasoning.trim().replace(/\n/g, '\n> ')}`)
     }
   }
   if (msg.content) {
@@ -779,7 +726,7 @@ function assistantTextContent(msg: { content: string; reasoning?: string }, stre
   const parts: string[] = []
   if (streamFrame) parts.push(streamFrame)
   if (msg.reasoning && msg.reasoning.trim()) {
-    parts.push(`thinking\n${msg.reasoning.trim()}`)
+    parts.push(`~thinking~\n${msg.reasoning.trim()}`)
   }
   if (msg.content) parts.push(msg.content)
   return parts.join('\n\n')
@@ -1134,7 +1081,7 @@ export function bootUI() {
 
   if (!activityRefreshTimer) {
     const poll = async () => {
-      latestGitSnapshot = await collectGitActivity()
+      latestGitSnapshot = await collectGitActivitySnapshot(gitCwd())
       updateActivity()
     }
     void poll()

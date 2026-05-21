@@ -164,6 +164,8 @@ function buildSystemPrompt(): string {
     ``,
     `## Rules`,
     `- Use tools to investigate and make changes as needed`,
+    `- When you need to inspect files, search code, or run commands, call the appropriate tool. Do not describe the tool call in prose.`,
+    `- Do not answer with an investigation plan like "I need to search" or "Let's inspect"; perform the tool call instead.`,
     `- After receiving tool results, synthesize them into a final response for the user`,
     `- Do NOT keep calling tools indefinitely. Once you have enough information, stop and answer.`,
     `- After making a change, verify it if possible`,
@@ -196,6 +198,7 @@ async function callOllamaStream(
       model: MODEL,
       messages,
       tools: TOOLS,
+      tool_choice: 'auto',
       stream: true,
     }),
   })
@@ -269,6 +272,100 @@ async function callOllamaStream(
 
   const toolCalls = toolCallsMap.size > 0 ? Array.from(toolCallsMap.values()) : undefined
   return { content, toolCalls }
+}
+
+function normalizeToolName(name: string): string | null {
+  const known = new Set(TOOLS.map((tool) => tool.function.name))
+  return known.has(name) ? name : null
+}
+
+function makeToolCall(name: string, args: Record<string, unknown>, index = 0): ToolCall | null {
+  const normalized = normalizeToolName(name)
+  if (!normalized) return null
+  return {
+    id: `text_call_${Date.now()}_${index}`,
+    type: 'function',
+    function: {
+      name: normalized,
+      arguments: JSON.stringify(args),
+    },
+  }
+}
+
+function extractJsonObject(text: string): unknown | null {
+  const trimmed = text.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/)
+  const candidate = fenced ? fenced[1].trim() : trimmed
+  if (!candidate.startsWith('{') || !candidate.endsWith('}')) return null
+  try {
+    return JSON.parse(candidate)
+  } catch {
+    return null
+  }
+}
+
+function coerceTextToolCall(content: string): ToolCall[] | undefined {
+  const parsed = extractJsonObject(content)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+
+  const obj = parsed as Record<string, any>
+  const rawName = obj.name ?? obj.tool ?? obj.function?.name ?? obj.function
+  const rawArgs = obj.arguments ?? obj.args ?? obj.parameters ?? obj.function?.arguments
+
+  if (typeof rawName === 'string') {
+    const args = typeof rawArgs === 'string'
+      ? (() => { try { return JSON.parse(rawArgs) } catch { return null } })()
+      : rawArgs
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      const call = makeToolCall(rawName, args)
+      return call ? [call] : undefined
+    }
+  }
+
+  if (typeof obj.command === 'string') {
+    const call = makeToolCall('bash', {
+      command: obj.command,
+      description: typeof obj.description === 'string' ? obj.description : 'run command',
+    })
+    return call ? [call] : undefined
+  }
+
+  return undefined
+}
+
+function looksLikeUnexecutedInvestigation(content: string, reasoning?: string): boolean {
+  const text = `${reasoning ?? ''}\n${content}`.toLowerCase()
+  if (!text.trim()) return false
+
+  const investigationSignals = [
+    /\bwe need to\b/,
+    /\bi need to\b/,
+    /\blet'?s\b/,
+    /\bsearch\b/,
+    /\binspect\b/,
+    /\bread\b/,
+    /\blist\b/,
+    /\bopen\b/,
+    /\bfind\b/,
+    /\bgrep\b/,
+    /\bglob\b/,
+    /\bbash\b/,
+    /\brun\b/,
+  ]
+
+  const completionSignals = [
+    /\bimplemented\b/,
+    /\bfixed\b/,
+    /\bupdated\b/,
+    /\bcreated\b/,
+    /\bverified\b/,
+    /\bno code changes\b/,
+    /\bi can'?t\b/,
+    /\bnot able\b/,
+  ]
+
+  return investigationSignals.some((pattern) => pattern.test(text))
+    && !completionSignals.some((pattern) => pattern.test(text))
 }
 
 function resolvePath(p: string): string {
@@ -375,6 +472,7 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
   ]
 
   const maxIterations = 25
+  let missingToolRetries = 0
 
   for (let i = 0; i < maxIterations; i++) {
     const { content, toolCalls } = await callOllamaStream(messages, {
@@ -382,11 +480,13 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
       onReasoning: callbacks?.onReasoning,
     })
 
-    if (toolCalls && toolCalls.length > 0) {
-      const assistantMsg: Msg = { role: 'assistant', content, tool_calls: toolCalls }
+    const effectiveToolCalls = toolCalls ?? coerceTextToolCall(content)
+
+    if (effectiveToolCalls && effectiveToolCalls.length > 0) {
+      const assistantMsg: Msg = { role: 'assistant', content, tool_calls: effectiveToolCalls }
       messages.push(assistantMsg)
 
-      for (const tc of toolCalls) {
+      for (const tc of effectiveToolCalls) {
         let diff: string | undefined
         if (tc.function.name === 'write_file' || tc.function.name === 'edit_file') {
           try {
@@ -416,6 +516,16 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
         const result = await executeTool(tc)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
       }
+      continue
+    }
+
+    if (looksLikeUnexecutedInvestigation(content) && missingToolRetries < 2) {
+      missingToolRetries++
+      messages.push({ role: 'assistant', content })
+      messages.push({
+        role: 'user',
+        content: 'You described an investigation step but did not call a tool. Call read_file, grep, glob, or bash now. Do not narrate the search.',
+      })
       continue
     }
 
@@ -538,4 +648,3 @@ function formatHunk(hunk: any[]): string {
   
   return `@@ -${oldStart},${oldLen} +${newStart},${newLen} @@\n${lines.join('\n')}`
 }
-
