@@ -192,6 +192,8 @@ function summarizeToolArgs(name: string, args: string): string {
       const include = parsed.include ? ` in ${parsed.include}` : ''
       return `${String(parsed.pattern ?? '')}${include}`
     }
+    case 'search':
+      return `${String(parsed.query ?? '')} in ${String(parsed.path ?? '.')}`
     case 'bash':
       return String(parsed.command ?? '').slice(0, 240)
     case 'write_file':

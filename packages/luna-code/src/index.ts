@@ -112,6 +112,21 @@ const TOOLS: ToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'search',
+      description: 'Search file contents under a path for plain text',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File or directory path to search in' },
+          query: { type: 'string', description: 'Plain text to search for' },
+        },
+        required: ['path', 'query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'grep',
       description: 'Search file contents with a regex pattern',
       parameters: {
@@ -168,12 +183,21 @@ function buildSystemPrompt(): string {
     `- Do not answer with an investigation plan like "I need to search" or "Let's inspect"; perform the tool call instead.`,
     `- After receiving tool results, synthesize them into a final response for the user`,
     `- Do NOT keep calling tools indefinitely. Once you have enough information, stop and answer.`,
-    `- After making a change, verify it if possible`,
+    `- After making a change, verify it with an appropriate project command whenever possible.`,
     `- When you are done, provide a brief summary of what you did`,
     `- Be decisive. If the user says "implement it" and you just suggested a feature, implement it without asking for clarification.`,
     `- Never include internal deliberation, uncertainty, or "maybe" style reasoning in your responses. If you are unsure, ask a brief (1-2 sentence) clarifying question.`,
     `- Be concise. Keep responses short and to the point. Avoid lengthy explanations unless asked.`,
     `- Use concise bullet-point lists instead of tables when presenting structured information. Tables are hard to read in a terminal.`,
+    ``,
+    `## Code editing standards`,
+    `- Make functional changes, not marker changes. If asked to remove something, delete the code and any now-unused helpers/imports/styles; do not replace it with a comment, placeholder, TODO, disabled block, or dead stub.`,
+    `- Do not add comments explaining that code was removed or changed. Comments should explain non-obvious remaining code only.`,
+    `- Preserve existing style and structure. Keep edits scoped to the user's request and avoid unrelated rewrites.`,
+    `- After removing or renaming code, search for exact leftover references to every removed symbol, handler, label, CSS class, import, and rendered text. Fix any leftovers before answering.`,
+    `- Prefer the smallest complete fix that leaves the app in a working state. If a change affects UI layout or behavior, update all connected state, event handlers, and rendering code.`,
+    `- Run the narrowest available verification command after edits. Prefer lint or typecheck first, then targeted tests, then build. Use package scripts when present, such as lint, typecheck, test, or build.`,
+    `- Do not claim a code change is complete until verification has run or you have a concrete reason it could not run. If verification fails, fix related failures before answering; otherwise report the exact failure and whether it appears related to your change.`,
     ``,
     `## Available tools`,
     `${TOOLS.map((t) => `  - ${t.function.name}: ${t.function.description}`).join('\n')}`,
@@ -279,6 +303,32 @@ function normalizeToolName(name: string): string | null {
   return known.has(name) ? name : null
 }
 
+function parseToolArgs(argsStr: string): Record<string, any> | null {
+  try {
+    const parsed = JSON.parse(argsStr)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function normalizeToolCall(tc: ToolCall, index = 0): ToolCall | null {
+  const normalized = normalizeToolName(tc.function.name)
+  if (!normalized) return null
+
+  const args = parseToolArgs(tc.function.arguments)
+  if (!args) return null
+
+  return {
+    id: tc.id || `call_${index}`,
+    type: 'function',
+    function: {
+      name: normalized,
+      arguments: JSON.stringify(args),
+    },
+  }
+}
+
 function makeToolCall(name: string, args: Record<string, unknown>, index = 0): ToolCall | null {
   const normalized = normalizeToolName(name)
   if (!normalized) return null
@@ -372,6 +422,62 @@ function resolvePath(p: string): string {
   return join(CWD, p)
 }
 
+function truncateToolResult(result: string): string {
+  const maxChars = 24_000
+  if (result.length <= maxChars) return result
+  return `${result.slice(0, maxChars)}\n\n[tool result truncated: ${result.length - maxChars} more characters]`
+}
+
+function isHiddenPath(path: string): boolean {
+  return /(^|\/)(node_modules|dist|\.git|\.next|\.cache)(\/|$)/.test(path)
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+async function searchFiles(rootPath: string, query: string): Promise<string> {
+  const fullRoot = resolvePath(rootPath)
+  const results: string[] = []
+  const re = new RegExp(escapeRegExp(query), 'i')
+  let count = 0
+
+  async function scanFile(file: string) {
+    if (count >= 100 || isHiddenPath(file)) return
+    const fullPath = resolvePath(file)
+    try {
+      if (statSync(fullPath).isDirectory()) return
+      const content = readFileSync(fullPath, 'utf-8')
+      const lines = content.split('\n')
+      for (let i = 0; i < lines.length; i++) {
+        if (re.test(lines[i])) {
+          results.push(`${file}:${i + 1}: ${lines[i].trim()}`)
+          count++
+          if (count >= 100) break
+        }
+      }
+    } catch {
+      // skip unreadable/binary files
+    }
+  }
+
+  try {
+    if (statSync(fullRoot).isFile()) {
+      await scanFile(rootPath)
+    } else {
+      const g = new Bun.Glob(`${rootPath.replace(/\/$/, '')}/**/*`)
+      for await (const file of g.scan({ cwd: CWD })) {
+        await scanFile(file)
+        if (count >= 100) break
+      }
+    }
+  } catch {
+    return `(path not found: ${rootPath})`
+  }
+
+  return results.join('\n') || '(no matches)'
+}
+
 async function executeTool(tc: ToolCall): Promise<string> {
   const { name, arguments: argsStr } = tc.function
   const args = JSON.parse(argsStr)
@@ -424,6 +530,9 @@ async function executeTool(tc: ToolCall): Promise<string> {
         }
         return matches.join('\n') || '(no matches)'
       }
+      case 'search': {
+        return await searchFiles(args.path ?? '.', args.query ?? '')
+      }
       case 'grep': {
         const { pattern, include } = args
         const g = new Bun.Glob(include ?? '**/*')
@@ -435,7 +544,7 @@ async function executeTool(tc: ToolCall): Promise<string> {
           const fullPath = resolvePath(file)
           try {
             if (statSync(fullPath).isDirectory()) continue
-            if (/^(node_modules|dist|\..+)/.test(file)) continue
+            if (isHiddenPath(file)) continue
             const content = readFileSync(fullPath, 'utf-8')
             const lines = content.split('\n')
             for (let i = 0; i < lines.length; i++) {
@@ -473,14 +582,29 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
 
   const maxIterations = 25
   let missingToolRetries = 0
+  let executedToolCount = 0
 
   for (let i = 0; i < maxIterations; i++) {
-    const { content, toolCalls } = await callOllamaStream(messages, {
-      onToken: callbacks?.onToken,
-      onReasoning: callbacks?.onReasoning,
-    })
+    let content = ''
+    let toolCalls: ToolCall[] | undefined
+    try {
+      const result = await callOllamaStream(messages, {
+        onToken: callbacks?.onToken,
+        onReasoning: callbacks?.onReasoning,
+      })
+      content = result.content
+      toolCalls = result.toolCalls
+    } catch (err) {
+      if (executedToolCount > 0) {
+        callbacks?.onToken?.(`I ran ${executedToolCount} tool call${executedToolCount === 1 ? '' : 's'}, but the model failed while synthesizing the result: ${String(err)}`)
+        return
+      }
+      throw err
+    }
 
-    const effectiveToolCalls = toolCalls ?? coerceTextToolCall(content)
+    const effectiveToolCalls = (toolCalls ?? coerceTextToolCall(content))
+      ?.map((tc, index) => normalizeToolCall(tc, index))
+      .filter((tc): tc is ToolCall => tc !== null)
 
     if (effectiveToolCalls && effectiveToolCalls.length > 0) {
       const assistantMsg: Msg = { role: 'assistant', content, tool_calls: effectiveToolCalls }
@@ -513,8 +637,9 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
         }
 
         callbacks?.onToolCall?.(tc.function.name, tc.function.arguments, diff)
-        const result = await executeTool(tc)
+        const result = truncateToolResult(await executeTool(tc))
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
+        executedToolCount++
       }
       continue
     }

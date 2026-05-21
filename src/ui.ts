@@ -479,7 +479,6 @@ function makeCommitFooter() {
 
   const generateButton = makeSparkleButton(() => { void generateCommitSummary() })
   const commitButton = makeFooterButton('commit-button', 'Commit', theme.blue, () => { void commitChanges() })
-  const pushButton = makeFooterButton('push-button', 'Push', theme.cyan, () => { void pushChanges() })
 
   return Box(
     {
@@ -506,7 +505,6 @@ function makeCommitFooter() {
         width: '100%',
       } as any,
       commitButton,
-      pushButton,
     ),
   ) as any
 }
