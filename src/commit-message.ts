@@ -25,7 +25,7 @@ type GenerateCommitDraftOptions = {
 }
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434'
-const COMMIT_MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:20b-cloud'
+const COMMIT_MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:120b-cloud'
 
 export async function generateCommitDraft(
   snapshot: CommitSnapshot,

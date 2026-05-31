@@ -6,7 +6,7 @@ import { join } from 'node:path'
 const execAsync = promisify(exec)
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434'
-const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:20b-cloud'
+const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:120b-cloud'
 const CWD = process.env.LUNA_CWD ?? process.cwd()
 
 interface ToolDef {
@@ -169,9 +169,9 @@ function buildSystemPrompt(): string {
         if (pkg.scripts) info.push(`scripts: ${Object.keys(pkg.scripts).join(', ')}`)
         if (pkg.description) info.push(`description: ${pkg.description}`)
         if (info.length) parts.push(`package.json: ${info.join(' | ')}`)
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
 
   parts.push(
     ``,
@@ -583,7 +583,9 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
 
   const maxIterations = 25
   let missingToolRetries = 0
+  let emptyFinalRetries = 0
   let executedToolCount = 0
+  const executedToolNames: string[] = []
 
   for (let i = 0; i < maxIterations; i++) {
     let content = ''
@@ -642,8 +644,24 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
         callbacks?.onToolResult?.(tc.function.name, result, tc.id)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
         executedToolCount++
+        executedToolNames.push(tc.function.name)
       }
       continue
+    }
+
+    if (!content.trim() && executedToolCount > 0 && emptyFinalRetries < 2) {
+      emptyFinalRetries++
+      messages.push({
+        role: 'user',
+        content: 'You have executed tools. Now provide a concise final response for the user that says what changed, whether anything failed or was unverified, and what they should try next. Do not call more tools unless you must verify a specific uncertainty.',
+      })
+      continue
+    }
+
+    if (!content.trim() && executedToolCount > 0) {
+      const tools = [...new Set(executedToolNames)].join(', ')
+      callbacks?.onToken?.(`I ran tools (${tools}), but the model did not produce a final response. Expand the thinking block or check Activity for the tool log before deciding what to try next.`)
+      return
     }
 
     if (looksLikeUnexecutedInvestigation(content) && missingToolRetries < 2) {
@@ -663,14 +681,14 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
 export function generateDiff(path: string, oldContent: string, newContent: string): string {
   const oldLines = oldContent ? oldContent.split(/\r?\n/) : []
   const newLines = newContent ? newContent.split(/\r?\n/) : []
-  
+
   const m = oldLines.length
   const n = newLines.length
-  
+
   if (m > 1000 || n > 1000) {
     return `--- a/${path}\n+++ b/${path}\n@@ -1,${m} +1,${n} @@\n[File too large to diff - showing replacement]\n- ${oldLines.slice(0, 5).join('\n- ')}\n...\n+ ${newLines.slice(0, 5).join('\n+ ')}\n...`
   }
-  
+
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Int32Array(n + 1) as any)
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
@@ -681,14 +699,14 @@ export function generateDiff(path: string, oldContent: string, newContent: strin
       }
     }
   }
-  
+
   interface DiffItem {
     type: 'added' | 'removed' | 'unchanged'
     value: string
     oldLineNum: number
     newLineNum: number
   }
-  
+
   const diffItems: DiffItem[] = []
   let i = m, j = n
   while (i > 0 || j > 0) {
@@ -704,11 +722,11 @@ export function generateDiff(path: string, oldContent: string, newContent: strin
       i--
     }
   }
-  
+
   const contextSize = 3
   const hunks: string[] = []
   let currentHunk: DiffItem[] = []
-  
+
   for (let k = 0; k < diffItems.length; k++) {
     const item = diffItems[k]
     if (item.type !== 'unchanged') {
@@ -739,15 +757,15 @@ export function generateDiff(path: string, oldContent: string, newContent: strin
       }
     }
   }
-  
+
   if (currentHunk.length > 0) {
     hunks.push(formatHunk(currentHunk))
   }
-  
+
   if (hunks.length === 0) {
     return ''
   }
-  
+
   return `--- a/${path}\n+++ b/${path}\n${hunks.join('\n')}`
 }
 
@@ -763,15 +781,15 @@ function findLastChangeIdx(diffItems: any[], hunk: any[]): number {
 function formatHunk(hunk: any[]): string {
   const oldStart = hunk.find(h => h.oldLineNum !== -1)?.oldLineNum ?? 0
   const newStart = hunk.find(h => h.newLineNum !== -1)?.newLineNum ?? 0
-  
+
   const oldLen = hunk.filter(h => h.type !== 'added').length
   const newLen = hunk.filter(h => h.type !== 'removed').length
-  
+
   const lines = hunk.map(h => {
     if (h.type === 'added') return `+${h.value}`
     if (h.type === 'removed') return `-${h.value}`
     return ` ${h.value}`
   })
-  
+
   return `@@ -${oldStart},${oldLen} +${newStart},${newLen} @@\n${lines.join('\n')}`
 }

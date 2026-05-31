@@ -51,6 +51,9 @@ let latestGitSnapshot: GitActivitySnapshot | null = null
 let lastRenderedSnapshotKey: string | null = null
 let commitNameInput: InputRenderable | null = null
 let commitBodyInput: TextareaRenderable | null = null
+let slashCommandHelpInstance: any = null
+let copyToastInstance: any = null
+let copyToastTimer: ReturnType<typeof setTimeout> | null = null
 
 // ── UI components ─────────────────────────────────────────
 
@@ -75,6 +78,16 @@ type MessageBlock = {
 }
 
 const conversationBlocks: MessageBlock[] = []
+
+const slashCommands = [
+  { command: '/clear', description: 'Clear the active conversation' },
+  { command: '/reset', description: 'Reset the active agent to the boilerplate entrypoint' },
+  { command: '/debug', description: 'Copy conversation and activity diagnostics' },
+  { command: '/thought', description: 'Toggle the latest thinking block' },
+  { command: '/t', description: 'Alias for /thought' },
+  { command: '/thought <n>', description: 'Toggle a specific assistant thinking block' },
+  { command: '/t <n>', description: 'Alias for /thought <n>' },
+]
 
 export const conversationList = Box({
   id: 'conversation-list',
@@ -198,11 +211,130 @@ function handleSubmit() {
   log('SUBMIT pressed, value length:', value.length)
   if (value.trim() && !activeAgent()?.isBusy) {
     input.setText('')
+    updateSlashCommandHelp()
     if (handleSlashCommand(value.trim())) return
     sendMessage(value)
   } else {
     log('SUBMIT ignored', { trimmed: !!value.trim(), busy: activeAgent()?.isBusy })
   }
+}
+
+function slashCommandHelpContent(value: string): string {
+  const query = value.trim()
+  const matches = slashCommands.filter((item) => {
+    if (query === '/') return true
+    const base = item.command.split(' ')[0]
+    return base.startsWith(query) || query.startsWith(base)
+  })
+  const visible = matches.length > 0 ? matches : slashCommands
+  return visible.map((item) => `${item.command.padEnd(14)} ${item.description}`).join('\n')
+}
+
+export const slashCommandHelpText = new TextRenderable(renderer, {
+  id: 'slash-command-help-text',
+  content: '',
+  selectable: false,
+  wrapMode: 'word',
+})
+
+export const slashCommandHelp = Box(
+  {
+    id: 'slash-command-help',
+    visible: false,
+    height: 0,
+    flexDirection: 'column',
+    backgroundColor: '#1e2030',
+    borderStyle: 'single',
+    borderColor: theme.border,
+    paddingX: 2,
+    paddingTop: 1,
+    paddingBottom: 1,
+    width: '100%',
+  } as any,
+  slashCommandHelpText,
+) as any
+
+const copyToastText = new TextRenderable(renderer, {
+  id: 'copy-toast-text',
+  content: new StyledText([fg(theme.green)(' Copied! ')]),
+  selectable: false,
+})
+
+const copyToast = Box(
+  {
+    id: 'copy-toast',
+    position: 'absolute',
+    top: 1,
+    right: 28,
+    width: 13,
+    height: 3,
+    zIndex: 100,
+    visible: false,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.bgHighlight,
+    borderStyle: 'rounded',
+    borderColor: theme.green,
+  } as any,
+  copyToastText,
+) as any
+
+function syncCopyToastPosition() {
+  const toast = copyToastInstance ?? copyToast
+  toast.right = sidebarCollapsed ? 6 : 28
+}
+
+function showCopiedToast() {
+  const toast = copyToastInstance ?? copyToast
+  syncCopyToastPosition()
+  toast.visible = true
+  toast.requestRender?.()
+  renderer.requestRender()
+
+  if (copyToastTimer) clearTimeout(copyToastTimer)
+  copyToastTimer = setTimeout(() => {
+    copyToastTimer = null
+    toast.visible = false
+    toast.requestRender?.()
+    renderer.requestRender()
+  }, 1000)
+}
+
+function copyTextToClipboard(text: string): boolean {
+  if (!text) return false
+  const copiedWithOsc52 = renderer.copyToClipboardOSC52(text)
+  if (copiedWithOsc52) return true
+
+  try {
+    const p = require('node:child_process')
+    p.execSync('pbcopy', { input: text })
+    return true
+  } catch (e) {
+    log('copy failed', e)
+    return false
+  }
+}
+
+function copySelection(selection = renderer.getSelection()) {
+  const text = selection?.getSelectedText()
+  if (!text || text.trim().length === 0) return
+  if (copyTextToClipboard(text)) showCopiedToast()
+}
+
+function updateSlashCommandHelp() {
+  const value = input.plainText
+  const shouldShow = value.startsWith('/') && !value.includes('\n')
+  const help = slashCommandHelpInstance ?? slashCommandHelp
+  help.visible = shouldShow
+  if (shouldShow) {
+    const content = slashCommandHelpContent(value)
+    slashCommandHelpText.content = content
+    help.height = content.split('\n').length + 4
+  } else {
+    help.height = 0
+  }
+  conversationBoxInstance?.requestRender?.()
+  renderer.requestRender()
 }
 
 export const input = new TextareaRenderable(renderer, {
@@ -221,6 +353,7 @@ export const input = new TextareaRenderable(renderer, {
     { name: "return", shift: true, action: "newline" },
   ],
   onSubmit: handleSubmit,
+  onContentChange: updateSlashCommandHelp,
 })
 
 // Boxes (created early, added to layout later)
@@ -245,6 +378,7 @@ export const conversationBox = Box(
     },
     conversationList,
   ),
+  slashCommandHelp,
   input,
 ) as any
 
@@ -641,6 +775,7 @@ export function toggleSidebar() {
       tb.width = sidebarCollapsed ? 3 : 24
     }
     syncTabsMascotVisibility()
+    syncCopyToastPosition()
     collapseBtn.content = new StyledText([
       sidebarCollapsed ? fg(theme.blue)(' ◀ ') : fg(theme.comment)(' ▶ ')
     ])
@@ -929,11 +1064,7 @@ export function handleSlashCommand(value: string): boolean {
       '=== Activity ===',
       ...(a?.diffLines ?? []),
     ]
-    const p = require('node:child_process')
-    p.execSync('pbcopy', { input: lines.join('\n') })
-    const prev = input.placeholder
-    input.placeholder = "Copied!"
-    setTimeout(() => { input.placeholder = prev }, 1500)
+    if (copyTextToClipboard(lines.join('\n'))) showCopiedToast()
     return true
   }
   if (value === '/thought' || value === '/t') {
@@ -955,11 +1086,7 @@ export function handleSlashCommand(value: string): boolean {
 renderer.keyInput.on("keypress", (event) => {
   if (event.ctrl && event.shift && event.name === "c") {
     event.preventDefault()
-    const sel = renderer.getSelection()
-    if (sel) {
-      const text = sel.getSelectedText()
-      if (text) renderer.copyToClipboardOSC52(text)
-    }
+    copySelection()
     return
   }
   if (event.name === "tab") {
@@ -988,15 +1115,23 @@ renderer.keyInput.on("keypress", (event) => {
     toggleLatestThought()
     return
   }
+
+  const typedChar = event.sequence && event.sequence.length === 1 ? event.sequence : null
   if (
     renderer.currentFocusedRenderable !== input
-    && event.name
-    && event.name.length === 1
+    && typedChar
     && !event.ctrl
     && !event.meta
   ) {
+    event.preventDefault()
     input.focus()
+    input.insertText(typedChar)
+    updateSlashCommandHelp()
   }
+})
+
+(renderer as any).on('selection', (selection: any) => {
+  copySelection(selection)
 })
 
 // ── Observers for Store Events ──────────────────────────────────
@@ -1054,6 +1189,7 @@ export function bootUI() {
       tabsBox,
     ),
   )
+  renderer.root.add(copyToast)
 
   const foundTabArea = renderer.root.findDescendantById('tab-area')
   if (foundTabArea) tabAreaInstance = foundTabArea
@@ -1061,12 +1197,17 @@ export function bootUI() {
   if (foundTabsBox) tabsBoxInstance = foundTabsBox
   const foundConvBox = renderer.root.findDescendantById('conversation-box')
   if (foundConvBox) conversationBoxInstance = foundConvBox
+  const foundSlashCommandHelp = renderer.root.findDescendantById('slash-command-help')
+  if (foundSlashCommandHelp) slashCommandHelpInstance = foundSlashCommandHelp
   const foundActivityBox = renderer.root.findDescendantById('activity-box')
   if (foundActivityBox) activityBoxInstance = foundActivityBox
   const foundConvList = renderer.root.findDescendantById('conversation-list')
   if (foundConvList) conversationListInstance = foundConvList
   const foundActivityList = renderer.root.findDescendantById('activity-list')
   if (foundActivityList) activityListInstance = foundActivityList
+  const foundCopyToast = renderer.root.findDescendantById('copy-toast')
+  if (foundCopyToast) copyToastInstance = foundCopyToast
+  syncCopyToastPosition()
 
   input.focus()
 

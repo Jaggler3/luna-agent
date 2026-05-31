@@ -98,7 +98,7 @@ export async function startAgent(id: string): Promise<Connection | null> {
   log('startAgent begin', id)
   const entrypoint = join(APP_ROOT, 'src', 'agent.ts')
   const sockPath = socketPath(id)
-  
+
   const meta = agents.get(id)?.meta ?? {
     name: 'agent',
     pid: null,
@@ -160,7 +160,7 @@ export async function ensureRunning(a: AgentData): Promise<void> {
 
 export async function deriveConversationName(prompt: string): Promise<string | null> {
   const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434'
-  const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:20b-cloud'
+  const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:120b-cloud'
   try {
     const res = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
       method: 'POST',
@@ -208,6 +208,18 @@ function summarizeToolArgs(name: string, args: string): string {
 function summarizeToolResult(result: string): string {
   const singleLine = result.replace(/\s+/g, ' ').trim()
   return singleLine.length > 360 ? `${singleLine.slice(0, 360)}...` : singleLine
+}
+
+function appendAssistantTrace(msg: { reasoning: string }, line: string) {
+  msg.reasoning = msg.reasoning ? `${msg.reasoning}\n${line}` : line
+}
+
+function clearCoercedToolPayload(msg: { content: string }) {
+  const trimmed = msg.content.trim()
+  if (!trimmed) return
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    msg.content = ''
+  }
 }
 
 function timeoutForAgent(a: AgentData): number {
@@ -318,12 +330,18 @@ export async function sendMessage(text: string) {
           } else {
             a.diffLines.push(`› ${name}: ${summarizeToolArgs(name, args)}`)
           }
+          clearCoercedToolPayload(agentMsg)
+          appendAssistantTrace(agentMsg, `tool call: ${name} ${summarizeToolArgs(name, args)}`)
           storeEmitter.emit('activity-updated')
+          storeEmitter.emit('update')
           break
         }
         case 'tool_result': {
-          a.diffLines.push(`‹ ${msg.name}: ${summarizeToolResult(msg.result)}`)
+          const summary = summarizeToolResult(msg.result)
+          a.diffLines.push(`‹ ${msg.name}: ${summary}`)
+          appendAssistantTrace(agentMsg, `tool result: ${msg.name} ${summary}`)
           storeEmitter.emit('activity-updated')
+          storeEmitter.emit('update')
           break
         }
         case 'done':
