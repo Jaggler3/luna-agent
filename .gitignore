@@ -7,3 +7,5 @@ PLANS.md
 _test/
 .DS_Store
 builds/
+debug.log
+test-*.ts
