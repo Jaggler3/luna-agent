@@ -138,6 +138,7 @@ export async function deriveConversationName(prompt: string): Promise<string | n
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: MODEL,
+        max_tokens: 10,
         messages: [
           { role: 'system', content: 'Generate a very short title (max 15 characters, ideally 1-3 words) for this coding conversation. Respond with ONLY the title, no quotes, no punctuation.' },
           { role: 'user', content: prompt },
