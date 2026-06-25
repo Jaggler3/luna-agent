@@ -18,7 +18,7 @@ export function activeAgent(): AgentData | null {
 }
 
 export function metaPath(id: string): string { return join(AGENTS_DIR, id, 'meta.json') }
-export function conversationPath(id: string): string { return join(AGENTS_DIR, id, 'conversation.jsonl') }
+export function conversationPath(id: string): string { return join(AGENTS_DIR, id, 'conversation.json') }
 export function socketPath(id: string): string { return join(AGENTS_DIR, id, 'socket.sock') }
 
 export function loadMeta(id: string): AgentMeta | null {
