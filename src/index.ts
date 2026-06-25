@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 
-import { unlinkSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { log } from './config'
 import { agents, createNewAgent, switchAgent, scanAgents, loadMeta, loadConversation, socketPath, saveMeta } from './store'
 import { isPidRunning, checkHealth } from './daemon'
+import { connectSocket } from 'luna-gateway'
 import { bootUI } from './ui'
 import type { AgentData } from './types'
 
@@ -23,15 +24,29 @@ for (const id of existing) {
   const conv = loadConversation(id)
   const messages = conv?.messages ?? []
 
-  let isRunning = false
   let conn = null
-  // Kill old agent processes on restart so they pick up latest luna-code changes
+  let isRunning = false
+  // Try to reconnect to existing agent instead of killing it
   if (meta.pid && isPidRunning(meta.pid)) {
-    log('killing stale agent', id, 'pid:', meta.pid)
-    try { process.kill(meta.pid) } catch { }
-    try { unlinkSync(socketPath(id)) } catch { }
-    meta.pid = null
-    saveMeta(id, meta)
+    const sockPath = socketPath(id)
+    if (existsSync(sockPath)) {
+      try {
+        conn = await connectSocket(sockPath)
+        isRunning = true
+        log('reconnected to existing agent', id, 'pid:', meta.pid)
+      } catch (e) {
+        log('failed to reconnect to agent, cleaning up', id, e)
+        try { process.kill(meta.pid) } catch { }
+        try { unlinkSync(sockPath) } catch { }
+        meta.pid = null
+        saveMeta(id, meta)
+      }
+    } else {
+      log('agent pid exists but socket not found, cleaning up', id, 'pid:', meta.pid)
+      try { process.kill(meta.pid) } catch { }
+      meta.pid = null
+      saveMeta(id, meta)
+    }
   }
 
   const data: AgentData = {
