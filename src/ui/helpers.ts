@@ -10,6 +10,13 @@ export function makeDebouncedUpdate(fn: () => void, delay = 50) {
   }
 }
 
+export function convertBracketSyntax(text: string): string {
+  return text
+    .replace(/\(\(([^)]+)\)\)/g, '**$1**')
+    .replace(/\[\[([^\]]+)\]\]/g, '`$1`')
+    .replace(/\{\{([^}]+)\}\}/g, '*$1*')
+}
+
 export function makeRenderableId(prefix: string, key: string): string {
   let hash = 0
   for (let i = 0; i < key.length; i++) {

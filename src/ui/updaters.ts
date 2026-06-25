@@ -14,7 +14,7 @@ import {
   activityViewFingerprint, gitCwd,
   activityBox,
 } from './shared'
-import { makeRenderableId } from './helpers'
+import { makeRenderableId, convertBracketSyntax } from './helpers'
 
 export function updateConversation() {
   try {
@@ -28,21 +28,22 @@ export function updateConversation() {
     for (let i = 0; i < a.messages.length; i++) {
       const msg = a.messages[i]
       if (msg.role === 'user') {
-        desired.push({ key: `msg-${i}-user`, role: 'user', mode: 'text', content: msg.content })
+        desired.push({ key: `msg-${i}-user`, role: 'user', mode: 'markdown', content: convertBracketSyntax(msg.content) })
       } else if (msg.role === 'assistant') {
         const isStreaming = a.isBusy && i === a.messages.length - 1
+        const raw = isStreaming ? assistantTextContent(msg, a.streamFrame) : assistantMarkdownContent(msg, false)
         desired.push({
           key: `msg-${i}-assistant`,
           role: 'assistant',
           mode: isStreaming ? 'text' : 'markdown',
-          content: isStreaming ? assistantTextContent(msg, a.streamFrame) : assistantMarkdownContent(msg, false),
+          content: convertBracketSyntax(raw),
         })
       } else if (msg.role === 'system') {
         desired.push({
           key: `msg-${i}-system`,
           role: msg.error ? 'error' : 'system',
-          mode: 'text',
-          content: msg.content,
+          mode: 'markdown',
+          content: convertBracketSyntax(msg.content),
         })
       }
     }

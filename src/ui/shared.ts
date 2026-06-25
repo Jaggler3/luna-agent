@@ -213,14 +213,13 @@ export const slashCommandHelp = Box(
 
 export const input = new TextareaRenderable(renderer, {
   id: 'main-input',
-  placeholder: "Ask the agent to do something...",
   backgroundColor: theme.bgHighlight,
   focusedBackgroundColor: theme.bgHighlight,
   textColor: theme.fg,
   cursorColor: theme.blue,
+  height: 2,
+  maxHeight: 8,
   wrapMode: "word",
-  maxHeight: 5,
-  paddingTop: 1,
   keyBindings: [
     { name: "return", action: "submit" },
     { name: "linefeed", action: "submit" },
@@ -248,6 +247,7 @@ export const conversationBox = Box(
       stickyScroll: true,
       stickyStart: "bottom",
       scrollY: true,
+      marginBottom: 1,
     },
     conversationList,
   ),
@@ -305,6 +305,14 @@ export const tabsBox = Box(
 )
 
 // ── Factory Functions ──────────────────────────────────
+const MSG_BORDER_COLOR: Record<MessageRole, string> = {
+  user: theme.blue,
+  assistant: theme.purple,
+  thoughts: theme.comment,
+  system: theme.comment,
+  error: theme.red,
+}
+
 export function makeRoleLabel(role: MessageRole): StyledText {
   if (role === 'user') return new StyledText([fg(theme.blue)('you')])
   if (role === 'assistant') return new StyledText([fg(theme.purple)('luna')])
@@ -338,7 +346,11 @@ export function makeMessageBlock(desc: { key: string; role: MessageRole; mode: B
     id: boxId,
     flexDirection: 'column',
     backgroundColor: MSG_BG[desc.role],
-    paddingX: 2,
+    border: ['left'],
+    borderStyle: 'single',
+    borderColor: MSG_BORDER_COLOR[desc.role],
+    paddingLeft: 1,
+    paddingRight: 2,
     paddingTop: 1,
     paddingBottom: 1,
     gap: 0,

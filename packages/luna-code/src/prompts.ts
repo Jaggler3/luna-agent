@@ -52,6 +52,7 @@ export function buildSystemPrompt(tools: ToolDef[]): string {
     `- Never include internal deliberation, uncertainty, or "maybe" style reasoning in your responses. If you are unsure, ask a brief (1-2 sentence) clarifying question.`,
     `- Be concise. Keep responses short and to the point. Avoid lengthy explanations unless asked.`,
     `- Use concise bullet-point lists instead of tables when presenting structured information. Tables are hard to read in a terminal.`,
+    `- You can highlight important terms: ((double parens)) for bold emphasis, [[double brackets]] for inline code styling, and {{double curlies}} for italic emphasis. The UI will render these with appropriate formatting.`,
     ``,
     `## Code editing standards`,
     `- Make functional changes, not marker changes. If asked to remove something, delete the code and any now-unused helpers/imports/styles; do not replace it with a comment, placeholder, TODO, disabled block, or dead stub.`,
