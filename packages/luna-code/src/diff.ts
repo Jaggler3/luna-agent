@@ -9,7 +9,7 @@ export function generateDiff(path: string, oldContent: string, newContent: strin
     return `--- a/${path}\n+++ b/${path}\n@@ -1,${m} +1,${n} @@\n[File too large to diff - showing replacement]\n- ${oldLines.slice(0, 5).join('\n- ')}\n...\n+ ${newLines.slice(0, 5).join('\n+ ')}\n...`
   }
 
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Int32Array(n + 1) as any)
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array.from(new Int32Array(n + 1))) as number[][]
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
       if (oldLines[i - 1] === newLines[j - 1]) {
