@@ -1,8 +1,6 @@
 import type { Msg, ToolCall } from './types'
 import type { ToolDef } from './types'
-
-const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434'
-const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:120b-cloud'
+import { OLLAMA_URL, MODEL } from './constants'
 
 interface StreamCallbacks {
   onToken?: (t: string) => void

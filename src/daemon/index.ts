@@ -2,7 +2,8 @@ import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { connect } from 'luna-gateway'
 import type { Connection } from 'luna-gateway'
-import { AGENT_TIMEOUT_MS, APP_ROOT, currentWorkspaceCwd, log } from '../config'
+import { AGENT_TIMEOUT_MS, APP_ROOT, currentWorkspaceCwd, MAX_DIFF_LINES, log } from '../config'
+import { OLLAMA_URL, MODEL } from 'luna-code/constants'
 import { agents, activeAgent, saveMeta, saveConversation, socketPath, storeEmitter } from '../store'
 import type { AgentData } from '../types'
 import { BrailleBreathe } from './braille'
@@ -29,6 +30,13 @@ const server = createServer({
 
 await server.listen()
 `
+
+function pushDiffLine(a: AgentData, line: string) {
+  a.diffLines.push(line)
+  if (a.diffLines.length > MAX_DIFF_LINES) {
+    a.diffLines.splice(0, a.diffLines.length - MAX_DIFF_LINES)
+  }
+}
 
 export function isPidRunning(pid: number): boolean {
   try { return process.kill(pid, 0) }
@@ -124,8 +132,6 @@ export async function ensureRunning(a: AgentData): Promise<void> {
 }
 
 export async function deriveConversationName(prompt: string): Promise<string | null> {
-  const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434'
-  const MODEL = process.env.LUNA_MODEL ?? 'gpt-oss:120b-cloud'
   try {
     const res = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
       method: 'POST',
@@ -180,6 +186,85 @@ function timeoutForAgent(a: AgentData): number {
   return typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : AGENT_TIMEOUT_MS
 }
 
+// ── Animation helpers ─────────────────────────────────
+function startAnimation(a: AgentData, anim: BrailleBreathe) {
+  a.anim = anim
+  a.streamFrame = anim.step()
+  a.animTimer = setInterval(() => {
+    a.streamFrame = anim.step()
+    storeEmitter.emit('update')
+  }, 80)
+}
+
+function stopAnimation(a: AgentData, anim: BrailleBreathe) {
+  if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
+  a.streamFrame = ''
+  anim.free()
+}
+
+// ── Message handlers ──────────────────────────────────
+function handleTokenEvent(agentMsg: { content: string }, token: string) {
+  storeEmitter.emit('stream-start')
+  agentMsg.content += token
+  storeEmitter.emit('update')
+}
+
+function handleReasoningEvent(agentMsg: { reasoning: string }, chunk: string) {
+  storeEmitter.emit('stream-start')
+  agentMsg.reasoning += chunk
+  storeEmitter.emit('update')
+}
+
+function handleToolCallEvent(a: AgentData, agentMsg: any, name: string, args: string, diff?: string) {
+  let parsed: any = {}
+  try { parsed = JSON.parse(args) } catch { }
+  if ((name === 'write_file' || name === 'edit_file') && diff) {
+    pushDiffLine(a, `✎ ${parsed.path || ''}\n---\n${diff}`)
+  } else {
+    pushDiffLine(a, `› ${name}: ${summarizeToolArgs(name, args)}`)
+  }
+  clearCoercedToolPayload(agentMsg)
+  appendAssistantTrace(agentMsg, `tool call: ${name} ${summarizeToolArgs(name, args)}`)
+  storeEmitter.emit('activity-updated')
+  storeEmitter.emit('update')
+}
+
+function handleToolResultEvent(a: AgentData, agentMsg: any, name: string, result: string) {
+  const summary = summarizeToolResult(result)
+  pushDiffLine(a, `‹ ${name}: ${summary}`)
+  appendAssistantTrace(agentMsg, `tool result: ${name} ${summary}`)
+  storeEmitter.emit('activity-updated')
+  storeEmitter.emit('update')
+}
+
+// ── Terminal state handlers ────────────────────────────
+function finishWithDone(a: AgentData, agentMsg: { thinkingExpanded?: boolean }) {
+  a.streamFrame = ''
+  a.isBusy = false
+  storeEmitter.emit('stream-end')
+  agentMsg.thinkingExpanded = false
+  saveConversation(a.id, a.messages)
+  storeEmitter.emit('update')
+}
+
+function finishWithError(a: AgentData, errorText: string) {
+  a.streamFrame = ''
+  a.isBusy = false
+  storeEmitter.emit('stream-end')
+  a.messages.push({ role: 'system', content: errorText, error: true })
+  saveConversation(a.id, a.messages)
+  storeEmitter.emit('update')
+}
+
+function cleanupBusyState(a: AgentData, anim: BrailleBreathe) {
+  stopAnimation(a, anim)
+  if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
+  a.isBusy = false
+  storeEmitter.emit('update')
+  storeEmitter.emit('focus-input')
+}
+
+// ── Main entry point ──────────────────────────────────
 export async function sendMessage(text: string) {
   const a = activeAgent()
   log('sendMessage', text.slice(0, 50), 'agent:', a?.id, 'busy:', a?.isBusy)
@@ -196,7 +281,6 @@ export async function sendMessage(text: string) {
     storeEmitter.emit('focus-input')
     return
   }
-  log('sendMessage connection ready')
 
   a.messages.push({ role: 'user', content: text })
   saveConversation(a.id, a.messages)
@@ -218,116 +302,64 @@ export async function sendMessage(text: string) {
   storeEmitter.emit('update')
 
   a.conn.send(contextPrompt)
-  log('sendMessage sent with context')
 
   const anim = new BrailleBreathe()
-  a.anim = anim
-  a.streamFrame = anim.step()
-  a.animTimer = setInterval(() => {
-    a.streamFrame = anim.step()
-    storeEmitter.emit('update')
-  }, 80)
+  startAnimation(a, anim)
 
   const timeoutMs = timeoutForAgent(a)
+  let aborted = false
   a.timeout = setTimeout(() => {
+    if (aborted) return
+    aborted = true
     log('sendMessage timeout')
-    if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
-    a.streamFrame = ''
-    anim.free()
-    storeEmitter.emit('stream-end')
-    a.messages.push({ role: 'system', content: `timed out waiting for agent after ${timeoutMs}ms`, error: true })
-    saveConversation(a.id, a.messages)
-    a.isBusy = false
-    storeEmitter.emit('update')
+    stopAnimation(a, anim)
+    finishWithError(a, `timed out waiting for agent after ${timeoutMs}ms`)
+    if (a.conn) a.conn.kill()
     storeEmitter.emit('focus-input')
   }, timeoutMs)
 
   const iter = a.conn.receive()
   try {
-    while (true) {
+    while (!aborted) {
       const result = await iter.next()
-      if (result.done) { log('sendMessage receive loop done (connection closed)'); break }
+      if (result.done || aborted) break
       const msg = result.value
       switch (msg.type) {
-        case 'token': {
-          storeEmitter.emit('stream-start')
-          agentMsg.content += msg.content as string
-          storeEmitter.emit('update')
+        case 'token':
+          handleTokenEvent(agentMsg, msg.content)
           break
-        }
-        case 'reasoning': {
-          storeEmitter.emit('stream-start')
-          agentMsg.reasoning += msg.content as string
-          storeEmitter.emit('update')
+        case 'reasoning':
+          handleReasoningEvent(agentMsg, msg.content)
           break
-        }
-        case 'tool_call': {
-          const name = msg.name
-          const diff = msg.diff
-          const args = msg.args
-          let parsed: any = {}
-          try { parsed = JSON.parse(args) } catch { }
-          if ((name === 'write_file' || name === 'edit_file') && diff) {
-            a.diffLines.push(`✎ ${parsed.path || ''}\n---\n${diff}`)
-          } else {
-            a.diffLines.push(`› ${name}: ${summarizeToolArgs(name, args)}`)
-          }
-          clearCoercedToolPayload(agentMsg)
-          appendAssistantTrace(agentMsg, `tool call: ${name} ${summarizeToolArgs(name, args)}`)
-          storeEmitter.emit('activity-updated')
-          storeEmitter.emit('update')
+        case 'tool_call':
+          handleToolCallEvent(a, agentMsg, msg.name, msg.args, msg.diff)
           break
-        }
-        case 'tool_result': {
-          const summary = summarizeToolResult(msg.result)
-          a.diffLines.push(`‹ ${msg.name}: ${summary}`)
-          appendAssistantTrace(agentMsg, `tool result: ${msg.name} ${summary}`)
-          storeEmitter.emit('activity-updated')
-          storeEmitter.emit('update')
+        case 'tool_result':
+          handleToolResultEvent(a, agentMsg, msg.name, msg.result)
           break
-        }
         case 'done':
           log('sendMessage done')
-          a.streamFrame = ''
-          a.isBusy = false
-          storeEmitter.emit('stream-end')
-          agentMsg.thinkingExpanded = false
-          saveConversation(a.id, a.messages)
-          storeEmitter.emit('update')
+          aborted = true
+          finishWithDone(a, agentMsg)
           return
         case 'error':
           log('sendMessage agent error:', msg.error)
-          a.streamFrame = ''
-          a.isBusy = false
-          storeEmitter.emit('stream-end')
-          a.messages.push({ role: 'system', content: msg.error as string, error: true })
-          saveConversation(a.id, a.messages)
-          storeEmitter.emit('update')
+          aborted = true
+          finishWithError(a, msg.error)
           return
       }
     }
-    a.streamFrame = ''
-    a.isBusy = false
-    storeEmitter.emit('stream-end')
-    a.messages.push({ role: 'system', content: 'connection to agent lost', error: true })
-    saveConversation(a.id, a.messages)
-    storeEmitter.emit('update')
+    if (!aborted) {
+      finishWithError(a, 'connection to agent lost')
+    }
   } catch (err) {
-    log('sendMessage exception:', err)
-    a.streamFrame = ''
-    a.isBusy = false
-    storeEmitter.emit('stream-end')
-    a.messages.push({ role: 'system', content: String(err), error: true })
-    saveConversation(a.id, a.messages)
-    storeEmitter.emit('update')
+    if (!aborted) {
+      log('sendMessage exception:', err)
+      finishWithError(a, String(err))
+    }
   } finally {
-    if (a.animTimer) { clearInterval(a.animTimer); a.animTimer = null }
-    a.streamFrame = ''
-    anim.free()
-    if (a.timeout) { clearTimeout(a.timeout); a.timeout = null }
-    a.isBusy = false
-    storeEmitter.emit('update')
-    storeEmitter.emit('focus-input')
+    aborted = true
+    cleanupBusyState(a, anim)
   }
 }
 
