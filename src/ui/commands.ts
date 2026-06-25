@@ -1,5 +1,4 @@
-import { StyledText, fg, TextRenderable } from "@opentui/core"
-import { theme, log } from '../config'
+import { log } from '../config'
 import { activeAgent, agents, activeId, scanAgents, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, clearActiveConversation } from '../store'
 import { sendMessage, resetActiveAgentToBoilerplate } from '../daemon'
 import { toggleLatestThought, updateConversation, updateActivity } from './updaters'
@@ -114,7 +113,8 @@ function copySelection(selection?: any) {
 // ── Keyboard / Selection Bindings ─────────────────────
 export function bindKeyboard() {
   try {
-    renderer.keyInput.on("keypress", (event: any) => {
+    // @ts-expect-error
+    renderer.keyInput.on("keypress", (event: any) => { 
       if (event.ctrl && event.shift && event.name === "c") {
         event.preventDefault()
         copySelection()

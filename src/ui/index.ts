@@ -6,10 +6,9 @@ import { makeDebouncedUpdate } from './helpers'
 import {
   renderer, S, copyToast,
   conversationBox, activityBox, tabsBox,
-  input, conversationList, activityList,
-  syncTabsMascotVisibility, scheduleTabsMascotBlink,
+  input, syncTabsMascotVisibility, scheduleTabsMascotBlink,
   syncCopyToastPosition, gitCwd,
-  latestGitSnapshot, clearConversationBlocks,
+  clearConversationBlocks,
 } from './shared'
 import { updateConversation, updateActivity } from './updaters'
 import { updateBoxTitle, updateTabs } from './shared'
