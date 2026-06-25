@@ -11,6 +11,7 @@ export const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
 export const DEBUG_LOG = join(APP_ROOT, 'debug.log')
 export const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 export const DEFAULT_AGENT_TIMEOUT_MS = 120_000
+export const MAX_DIFF_LINES = 1000
 export const AGENT_TIMEOUT_MS = (() => {
   const raw = process.env.LUNA_AGENT_TIMEOUT_MS
   if (!raw) return DEFAULT_AGENT_TIMEOUT_MS
