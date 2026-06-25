@@ -1,8 +1,7 @@
-import { Box } from "@opentui/core"
 import { log } from '../config'
 import { storeEmitter } from '../store'
 import { collectGitActivity as collectGitActivitySnapshot } from '../git-activity'
-import { makeDebouncedUpdate } from './helpers'
+import { box, makeDebouncedUpdate } from './helpers'
 import {
   renderer, S, copyToast,
   conversationBox, activityBox, tabsBox,
@@ -69,13 +68,13 @@ storeEmitter.on('focus-input', () => {
 // ── Boot ───────────────────────────────────────────────
 export function bootUI() {
   renderer.root.add(
-    Box(
+    box(
       {
         flexDirection: "row",
         width: "100%",
         height: "100%",
         backgroundColor: "#1a1b26",
-      } as any,
+      },
       conversationBox,
       activityBox,
       tabsBox,

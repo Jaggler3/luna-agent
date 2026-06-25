@@ -164,7 +164,7 @@ export function bindKeyboard() {
   }
 
   try {
-    (renderer as any).on('selection', (selection: any) => {
+    renderer.on('selection', (selection: any) => {
       copySelection(selection)
     })
   } catch (e) {

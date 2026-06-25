@@ -14,7 +14,7 @@ import {
   activityViewFingerprint, gitCwd,
   activityBox,
 } from './shared'
-import { makeRenderableId, convertBracketSyntax } from './helpers'
+import { box, makeRenderableId, convertBracketSyntax } from './helpers'
 
 export function updateConversation() {
   try {
@@ -144,7 +144,7 @@ export function updateActivity() {
         content: 'No current changes.',
         selectable: false,
       })
-      const box = Box({
+      const blockBox = box({
         id: boxId,
         flexDirection: 'column',
         backgroundColor: theme.bg,
@@ -153,7 +153,7 @@ export function updateActivity() {
         paddingBottom: 1,
         gap: 1,
         width: '100%',
-      } as any, header, body) as any
+      }, header, body)
       body.visible = false
       const block = {
         key: emptyKey,
@@ -164,7 +164,7 @@ export function updateActivity() {
         expanded: false,
         header,
         body,
-        box,
+        box: blockBox,
       }
       header.onMouseDown = (ev: { button: number }) => { if (ev.button === 0) toggleActivityBlock(emptyKey) }
       list.add(block.box)
@@ -180,7 +180,7 @@ export function updateActivity() {
       list.add(next.box)
       activityBlocks.push(next)
     }
-  } catch (e) { log('updateActivity error', String(e), (e as any)?.stack ?? '') }
+  } catch (e) { log('updateActivity error', String(e), e instanceof Error ? e.stack : '') }
 }
 
 export async function generateCommitSummary() {

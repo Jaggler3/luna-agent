@@ -1,5 +1,5 @@
 import { createCliRenderer, Box, ScrollBox, TextRenderable, TextareaRenderable, InputRenderable, StyledText, fg, bg, MarkdownRenderable, DiffRenderable } from "@opentui/core"
-import type { TextChunk } from "@opentui/core"
+import type { TextChunk, ProxiedVNode } from "@opentui/core"
 import { theme, syntaxStyle, log } from '../config'
 import { currentWorkspaceCwd } from '../config'
 import type { GitDiffSection, GitFileChange } from '../git-activity'
@@ -9,57 +9,78 @@ import { dedentUnifiedDiffForDisplay } from '../diff-display'
 import { generateCommitDraft } from '../commit-message'
 import { commitAllChanges, pushChanges as gitPushChanges } from '../git-actions'
 import { MSG_BG, type MessageRole, type MessageBlock, type GitActivityBlock, type BodyMode } from './types'
-import { makeRenderableId } from './helpers'
+import { box, makeRenderableId } from './helpers'
 import { activeAgent, agents, activeId, scanAgents, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, storeEmitter } from '../store'
 
 export const renderer = await createCliRenderer({ exitOnCtrlC: true })
 
 // ── All mutable state in one object for cross-module reassignment ──
-export const S = {
-  tabAreaInstance: null as any,
-  conversationBoxInstance: null as any,
-  activityBoxInstance: null as any,
-  tabsBoxInstance: null as any,
+interface State {
+  tabAreaInstance: ProxiedVNode<any> | null
+  conversationBoxInstance: ProxiedVNode<any> | null
+  activityBoxInstance: ProxiedVNode<any> | null
+  tabsBoxInstance: ProxiedVNode<any> | null
+  sidebarCollapsed: boolean
+  tabsMascotEyesOpen: boolean
+  tabsMascotBlinkTimer: ReturnType<typeof setTimeout> | null
+  tabsMascotBlinkResetTimer: ReturnType<typeof setTimeout> | null
+  activityListInstance: ProxiedVNode<any> | null
+  activityRefreshTimer: ReturnType<typeof setInterval> | null
+  latestGitSnapshot: GitActivitySnapshot | null
+  lastRenderedSnapshotKey: string | null
+  commitNameInput: InputRenderable | null
+  commitBodyInput: TextareaRenderable | null
+  slashCommandHelpInstance: ProxiedVNode<any> | null
+  copyToastInstance: ProxiedVNode<any> | null
+  copyToastTimer: ReturnType<typeof setTimeout> | null
+  conversationListInstance: ProxiedVNode<any> | null
+}
+
+export const S: State = {
+  tabAreaInstance: null,
+  conversationBoxInstance: null,
+  activityBoxInstance: null,
+  tabsBoxInstance: null,
   sidebarCollapsed: false,
   tabsMascotEyesOpen: true,
-  tabsMascotBlinkTimer: null as ReturnType<typeof setTimeout> | null,
-  tabsMascotBlinkResetTimer: null as ReturnType<typeof setTimeout> | null,
-  activityListInstance: null as any,
-  activityRefreshTimer: null as ReturnType<typeof setInterval> | null,
-  latestGitSnapshot: null as GitActivitySnapshot | null,
-  lastRenderedSnapshotKey: null as string | null,
-  commitNameInput: null as InputRenderable | null,
-  commitBodyInput: null as TextareaRenderable | null,
-  slashCommandHelpInstance: null as any,
-  copyToastInstance: null as any,
-  copyToastTimer: null as ReturnType<typeof setTimeout> | null,
-  conversationListInstance: null as any,
+  tabsMascotBlinkTimer: null,
+  tabsMascotBlinkResetTimer: null,
+  activityListInstance: null,
+  activityRefreshTimer: null,
+  latestGitSnapshot: null,
+  lastRenderedSnapshotKey: null,
+  commitNameInput: null,
+  commitBodyInput: null,
+  slashCommandHelpInstance: null,
+  copyToastInstance: null,
+  copyToastTimer: null,
+  conversationListInstance: null,
 }
 
 export const conversationBlocks: MessageBlock[] = []
 export const activityBlocks: GitActivityBlock[] = []
 
-export const conversationList = Box({
+export const conversationList = box({
   id: 'conversation-list',
   flexDirection: 'column',
   gap: 1,
   width: '100%',
-} as any) as any
+})
 
-export const activityList = Box({
+export const activityList = box({
   id: 'activity-list',
   flexDirection: 'column',
   gap: 1,
   width: '100%',
-} as any) as any
+})
 
 export const tabArea = Box({ id: 'tab-area', flexDirection: 'column', gap: 1, width: 24 })
 
-const tabsSpacer = Box({
+const tabsSpacer = box({
   id: 'tabs-spacer',
   flexGrow: 1,
   width: '100%',
-} as any)
+})
 
 function makeTabsMascotContent(eyesOpen: boolean): StyledText {
   const eye = eyesOpen ? 'o' : '-'
@@ -78,16 +99,16 @@ const tabsMascotText = new TextRenderable(renderer, {
   selectable: false,
 })
 
-const tabsMascot = Box(
+const tabsMascot = box(
   {
     id: 'tabs-mascot',
     flexDirection: 'column',
     width: '100%',
     paddingTop: 1,
     paddingBottom: 1,
-  } as any,
+  },
   tabsMascotText,
-) as any
+)
 
 export function syncTabsMascotVisibility() {
   tabsMascot.visible = !S.sidebarCollapsed
@@ -134,7 +155,7 @@ const copyToastText = new TextRenderable(renderer, {
   selectable: false,
 })
 
-export const copyToast = Box(
+export const copyToast = box(
   {
     id: 'copy-toast',
     position: 'absolute',
@@ -149,9 +170,9 @@ export const copyToast = Box(
     backgroundColor: theme.bgHighlight,
     borderStyle: 'rounded',
     borderColor: theme.green,
-  } as any,
+  },
   copyToastText,
-) as any
+)
 
 export function syncCopyToastPosition() {
   const toast = S.copyToastInstance ?? copyToast
@@ -194,7 +215,7 @@ export const slashCommandHelpText = new TextRenderable(renderer, {
   wrapMode: 'word',
 })
 
-export const slashCommandHelp = Box(
+export const slashCommandHelp = box(
   {
     id: 'slash-command-help',
     visible: false,
@@ -207,9 +228,9 @@ export const slashCommandHelp = Box(
     paddingTop: 1,
     paddingBottom: 1,
     width: '100%',
-  } as any,
+  },
   slashCommandHelpText,
-) as any
+)
 
 export const input = new TextareaRenderable(renderer, {
   id: 'main-input',
@@ -229,7 +250,7 @@ export const input = new TextareaRenderable(renderer, {
   onContentChange: () => {},
 })
 
-export const conversationBox = Box(
+export const conversationBox = box(
   {
     id: 'conversation-box',
     flexDirection: "column",
@@ -240,7 +261,7 @@ export const conversationBox = Box(
     titleColor: theme.blue,
     padding: 1,
     gap: 1,
-  } as any,
+  },
   ScrollBox(
     {
       flexGrow: 1,
@@ -253,9 +274,9 @@ export const conversationBox = Box(
   ),
   slashCommandHelp,
   input,
-) as any
+)
 
-export const activityBox = Box(
+export const activityBox = box(
   {
     id: 'activity-box',
     visible: false,
@@ -267,15 +288,15 @@ export const activityBox = Box(
     titleColor: theme.green,
     padding: 1,
     gap: 1,
-  } as any,
-  Box(
+  },
+  box(
     {
       id: 'activity-content',
       flexGrow: 1,
       flexDirection: 'column',
       width: '100%',
       gap: 1,
-    } as any,
+    },
     ScrollBox(
       {
         flexGrow: 1,
@@ -287,7 +308,7 @@ export const activityBox = Box(
     ),
     makeCommitFooter(),
   ),
-) as any
+)
 
 export const tabsBox = Box(
   {
@@ -342,7 +363,7 @@ export function makeMessageBlock(desc: { key: string; role: MessageRole; mode: B
     content: makeRoleLabel(desc.role),
     selectable: false,
   })
-  const box = Box({
+  const blockVNode = box({
     id: boxId,
     flexDirection: 'column',
     backgroundColor: MSG_BG[desc.role],
@@ -355,8 +376,8 @@ export function makeMessageBlock(desc: { key: string; role: MessageRole; mode: B
     paddingBottom: 1,
     gap: 0,
     width: '100%',
-  } as any, label, body) as any
-  return { ...desc, boxId, body, box }
+  }, label, body)
+  return { ...desc, boxId, body, box: blockVNode }
 }
 
 export function setBlockContent(block: MessageBlock, content: string) {
@@ -432,8 +453,9 @@ function makeDiffRenderable(change: { key: string }, section: GitDiffSection, se
     addedSignColor: theme.green,
     removedSignColor: theme.red,
     lineNumberFg: theme.comment,
-  } as any)
-  const getScrollableCode = () => (diff as any).leftCodeRenderable ?? (diff as any).rightCodeRenderable
+  } as Record<string, unknown>)
+  const scrollable = diff as unknown as { leftCodeRenderable?: unknown; rightCodeRenderable?: unknown }
+  const getScrollableCode = () => scrollable.leftCodeRenderable ?? scrollable.rightCodeRenderable
   const scrollHorizontally = (delta: number) => {
     const code = getScrollableCode()
     if (!code) return false
@@ -471,7 +493,7 @@ function makeActivitySectionBlock(change: { key: string }, section: GitDiffSecti
     selectable: false,
   })
   const diff = makeDiffRenderable(change, section, sectionIndex)
-  return Box(
+  return box(
     {
       flexDirection: 'column',
       backgroundColor: theme.bgHighlight,
@@ -480,10 +502,10 @@ function makeActivitySectionBlock(change: { key: string }, section: GitDiffSecti
       paddingBottom: 1,
       gap: 1,
       width: '100%',
-    } as any,
+    },
     label,
     diff,
-  ) as any
+  )
 }
 
 export function makeActivityBlock(change: GitFileChange): GitActivityBlock {
@@ -502,17 +524,17 @@ export function makeActivityBlock(change: GitFileChange): GitActivityBlock {
         selectable: false,
       }),
     ]
-  const body = Box(
+  const body = box(
     {
       id: `${boxId}-body`,
       flexDirection: 'column',
       gap: 1,
       width: '100%',
-    } as any,
+    },
     ...bodyChildren,
-  ) as any
+  )
   body.visible = false
-  const box = Box(
+  const blockBox = box(
     {
       id: boxId,
       flexDirection: 'column',
@@ -522,10 +544,10 @@ export function makeActivityBlock(change: GitFileChange): GitActivityBlock {
       paddingBottom: 1,
       gap: 1,
       width: '100%',
-    } as any,
+    },
     header,
     body,
-  ) as any
+  )
   return {
     key: change.key,
     boxId,
@@ -535,7 +557,7 @@ export function makeActivityBlock(change: GitFileChange): GitActivityBlock {
     expanded: false,
     header,
     body,
-    box,
+    box: blockBox,
   }
 }
 
@@ -599,33 +621,33 @@ export function makeCommitFooter() {
   const commitButton = makeFooterButton('commit-button', 'Commit', theme.blue, () => {
     void import('./updaters').then(m => m.commitChanges())
   })
-  return Box(
+  return box(
     {
       id: 'commit-footer',
       flexDirection: 'column',
       gap: 1,
       width: '100%',
-    } as any,
-    Box(
+    },
+    box(
       {
         flexDirection: 'row',
         alignItems: 'center',
         gap: 1,
         width: '100%',
-      } as any,
+      },
       S.commitNameInput,
       generateButton,
     ),
     S.commitBodyInput,
-    Box(
+    box(
       {
         flexDirection: 'row',
         gap: 1,
         width: '100%',
-      } as any,
+      },
       commitButton,
     ),
-  ) as any
+  )
 }
 
 // ── Sidebar Toggle ─────────────────────────────────────

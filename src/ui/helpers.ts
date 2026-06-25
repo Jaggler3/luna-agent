@@ -17,6 +17,13 @@ export function convertBracketSyntax(text: string): string {
     .replace(/\{\{([^}]+)\}\}/g, '*$1*')
 }
 
+import { Box } from "@opentui/core"
+import type { ProxiedVNode } from "@opentui/core"
+
+export function box(config: Record<string, unknown>, ...children: unknown[]): ProxiedVNode<any> {
+  return Box(config as any, ...children) as any
+}
+
 export function makeRenderableId(prefix: string, key: string): string {
   let hash = 0
   for (let i = 0; i < key.length; i++) {
