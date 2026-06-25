@@ -8,10 +8,14 @@ import { join } from 'node:path'
 
 export type { SimpleRunCallbacks }
 
-const CWD = process.env.LUNA_CWD ?? process.cwd()
+function getCWD(): string {
+  return process.env.LUNA_CWD ?? process.cwd()
+}
+
+
 
 function resolvePath(p: string): string {
-  return join(CWD, p)
+  return join(getCWD(), p)
 }
 
 function truncateToolResult(result: string): string {
@@ -20,8 +24,8 @@ function truncateToolResult(result: string): string {
   return `${result.slice(0, maxChars)}\n\n[tool result truncated: ${result.length - maxChars} more characters]`
 }
 
-function looksLikeUnexecutedInvestigation(content: string, reasoning?: string): boolean {
-  const text = `${reasoning ?? ''}\n${content}`.toLowerCase()
+function looksLikeUnexecutedInvestigation(content: string): boolean {
+  const text = content.toLowerCase()
   if (!text.trim()) return false
   const investigationSignals = [/\bwe need to\b/, /\bi need to\b/, /\blet'?s\b/, /\bsearch\b/, /\binspect\b/, /\bread\b/, /\blist\b/, /\bopen\b/, /\bfind\b/, /\bgrep\b/, /\bglob\b/, /\bbash\b/, /\brun\b/]
   const completionSignals = [/\bimplemented\b/, /\bfixed\b/, /\bupdated\b/, /\bcreated\b/, /\bverified\b/, /\bno code changes\b/, /\bi can'?t\b/, /\bnot able\b/]
@@ -39,6 +43,9 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
   let emptyFinalRetries = 0
   let executedToolCount = 0
   const executedToolNames: string[] = []
+  const toolCallCounts = new Map<string, number>()
+  // Ring buffer of the last 3 [toolName, result] pairs for stagnation detection
+  const recentToolResults: Array<{ tool: string; result: string }> = []
 
   for (let i = 0; i < maxIterations; i++) {
     let content = ''
@@ -90,6 +97,30 @@ export async function simpleRun(prompt: string, callbacks?: SimpleRunCallbacks):
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id })
         executedToolCount++
         executedToolNames.push(tc.function.name)
+        toolCallCounts.set(tc.function.name, (toolCallCounts.get(tc.function.name) ?? 0) + 1)
+        recentToolResults.push({ tool: tc.function.name, result })
+        if (recentToolResults.length > 3) recentToolResults.shift()
+      }
+      // Stagnation check: if the last 3 results are all the same tool returning the same output,
+      // the model is spinning. Inject a hard redirect before the next model call.
+      if (recentToolResults.length === 3) {
+        const [a, b, c] = recentToolResults
+        if (a.tool === b.tool && b.tool === c.tool && a.result === b.result && b.result === c.result) {
+          messages.push({
+            role: 'user',
+            content: `You have called [[${a.tool}]] 3 times in a row and received the same result each time. Stop repeating the same approach. Either try a fundamentally different tool or strategy, or report what is blocking you and stop.`,
+          })
+          recentToolResults.length = 0
+        }
+      }
+      // Per-tool soft warning at 4+ calls of the same tool
+      for (const [toolName, count] of toolCallCounts) {
+        if (count === 4) {
+          messages.push({
+            role: 'user',
+            content: `You have now called [[${toolName}]] ${count} times. Unless each call returned new information, consider whether continuing with this tool is productive.`,
+          })
+        }
       }
       continue
     }

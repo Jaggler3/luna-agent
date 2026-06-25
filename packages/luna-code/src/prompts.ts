@@ -2,28 +2,32 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ToolDef } from './types'
 
-const CWD = process.env.LUNA_CWD ?? process.cwd()
+function getCWD(): string {
+  return process.env.LUNA_CWD ?? process.cwd()
+}
+
+
 
 export function buildSystemPrompt(tools: ToolDef[]): string {
   const parts: string[] = [
     `You are luna, a coding agent. You have access to tools that let you read, write, and edit files, run commands, and search code.`,
     ``,
     `## Working context`,
-    `Working directory: ${CWD}`,
+    `Working directory: ${getCWD()}`,
   ]
 
   try {
-    const entries = readdirSync(CWD)
+    const entries = readdirSync(getCWD())
     const filtered = entries.filter((e) => !/^(node_modules|\.git|dist|\.next|\.cache|\.DS_Store)$/.test(e))
     if (filtered.length > 0) {
       parts.push(`Top-level contents:`)
       for (const e of filtered) {
-        const full = join(CWD, e)
+        const full = join(getCWD(), e)
         const suffix = statSync(full).isDirectory() ? '/' : ''
         parts.push(`  ${e}${suffix}`)
       }
     }
-    const pkgPath = join(CWD, 'package.json')
+    const pkgPath = join(getCWD(), 'package.json')
     if (existsSync(pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
@@ -62,6 +66,10 @@ export function buildSystemPrompt(tools: ToolDef[]): string {
     `- Prefer the smallest complete fix that leaves the app in a working state. If a change affects UI layout or behavior, update all connected state, event handlers, and rendering code.`,
     `- Run the narrowest available verification command after edits. Prefer lint or typecheck first, then targeted tests, then build. Use package scripts when present, such as lint, typecheck, test, or build.`,
     `- Do not claim a code change is complete until verification has run or you have a concrete reason it could not run. If verification fails, fix related failures before answering; otherwise report the exact failure and whether it appears related to your change.`,
+    ``,
+    `## Bun-specific notes`,
+    `- When writing Bun tests that start a server ([[Bun.serve()]]), always call [[server.stop(true)]] (not [[server.stop()]]) in [[afterAll]]. The plain [[stop()]] does a graceful drain and keeps the process alive; [[stop(true)]] force-closes active connections so the test process exits cleanly and coverage can be written.`,
+    `- [[bun test --coverage]] writes its report only after the process exits. If the process hangs (e.g. due to a server that wasn't fully stopped), no coverage output will be generated. If coverage is missing, the most likely cause is a lingering server handle.`,
     ``,
     `## Available tools`,
     `${tools.map((t) => `  - ${t.function.name}: ${t.function.description}`).join('\n')}`,

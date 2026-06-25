@@ -5,20 +5,24 @@ import { join } from 'node:path'
 import type { ToolDef, ToolCall } from './types'
 
 const execAsync = promisify(exec)
-const CWD = process.env.LUNA_CWD ?? process.cwd()
+function getCWD(): string {
+  return process.env.LUNA_CWD ?? process.cwd()
+}
+
+
 
 export const TOOLS: ToolDef[] = [
   { type: 'function', function: { name: 'read_file', description: 'Read the contents of a file', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path to the file' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Write content to a file (creates directories if needed)', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path to the file' }, content: { type: 'string', description: 'File content' } }, required: ['path', 'content'] } } },
   { type: 'function', function: { name: 'edit_file', description: 'Replace exact string match in a file with new content', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path to the file' }, oldString: { type: 'string', description: 'Exact text to replace' }, newString: { type: 'string', description: 'Replacement text' } }, required: ['path', 'oldString', 'newString'] } } },
-  { type: 'function', function: { name: 'bash', description: 'Run a shell command and get its output', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Command to run' }, description: { type: 'string', description: 'Short description of the command' } }, required: ['command', 'description'] } } },
+  { type: 'function', function: { name: 'bash', description: 'Run a shell command and get its output. Commands that do not exit within 30 seconds will be killed. Avoid commands that start long-running servers; ensure tests clean up server processes in afterAll/teardown.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Command to run' }, description: { type: 'string', description: 'Short description of the command' } }, required: ['command', 'description'] } } },
   { type: 'function', function: { name: 'glob', description: 'Search for files matching a glob pattern', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Glob pattern (e.g. **/*.ts)' } }, required: ['pattern'] } } },
   { type: 'function', function: { name: 'search', description: 'Search file contents under a path for plain text', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File or directory path to search in' }, query: { type: 'string', description: 'Plain text to search for' } }, required: ['path', 'query'] } } },
   { type: 'function', function: { name: 'grep', description: 'Search file contents with a regex pattern', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Regex pattern to search for' }, include: { type: 'string', description: 'File glob to filter (e.g. *.ts)' } }, required: ['pattern'] } } },
 ]
 
 function resolvePath(p: string): string {
-  return join(CWD, p)
+  return join(getCWD(), p)
 }
 
 function truncateToolResult(result: string): string {
@@ -131,7 +135,8 @@ async function searchFiles(rootPath: string, query: string): Promise<string> {
       await scanFile(rootPath)
     } else {
       const g = new Bun.Glob(`${rootPath.replace(/\/$/, '')}/**/*`)
-      for await (const file of g.scan({ cwd: CWD })) {
+        for await (const file of g.scan({ cwd: getCWD() })) {
+
         await scanFile(file)
         if (count >= 100) break
       }
@@ -173,9 +178,14 @@ export async function executeTool(tc: ToolCall): Promise<string> {
         const dangerous = /(\brm\s+[-][^]*?\b\/\s)|(\bmv\s+\/\s)|(\bsudo\b)|(>\s*\/dev\/(sda|sdb|sdc|nvme|disk))|(:\(\)\s*\{.*:\s*\|:\s*\})/.test(cmd)
         if (dangerous) return '(command rejected: potentially destructive)'
         try {
-          const { stdout, stderr } = await execAsync(cmd, { cwd: CWD, maxBuffer: 10 * 1024 * 1024 })
+            const { stdout, stderr } = await execAsync(cmd, { cwd: getCWD(), maxBuffer: 10 * 1024 * 1024, timeout: 30_000 })
+
           return stdout || stderr || '(no output)'
         } catch (err: any) {
+          if (err.killed || err.signal === 'SIGTERM' || String(err.message).includes('timed out')) {
+            const partial = err.stdout ? `\nPartial output:\n${err.stdout}` : ''
+            return `command timed out after 30s (process was still running — it may be a long-running server or hanging test). If this is a test command that starts a server, ensure the server is stopped after tests, or run it in the background.${partial}`.trim()
+          }
           const out = err.stdout ? `stdout:\n${err.stdout}` : ''
           const errorText = err.stderr ? `stderr:\n${err.stderr}` : ''
           return `command failed with exit code ${err.code || 1}\n${out}\n${errorText}`.trim()
@@ -184,7 +194,7 @@ export async function executeTool(tc: ToolCall): Promise<string> {
       case 'glob': {
         const g = new Bun.Glob(args.pattern)
         const matches: string[] = []
-        for await (const match of g.scan({ cwd: CWD })) matches.push(match)
+        for await (const match of g.scan({ cwd: getCWD() })) matches.push(match)
         return matches.join('\n') || '(no matches)'
       }
       case 'search': {
@@ -196,7 +206,8 @@ export async function executeTool(tc: ToolCall): Promise<string> {
         const results: string[] = []
         const re = new RegExp(pattern)
         let count = 0
-        for await (const file of g.scan({ cwd: CWD })) {
+    for await (const file of g.scan({ cwd: getCWD() })) {
+
           if (count >= 100) break
           const fullPath = resolvePath(file)
           try {
