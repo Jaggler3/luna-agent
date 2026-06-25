@@ -53,6 +53,12 @@ export function clearActiveConversation(): string | null {
   return a.id
 }
 
+export function renameActiveAgent(newName: string) {
+  const a = activeAgent()
+  if (a?.meta) a.meta.name = newName
+  storeEmitter.emit('update')
+}
+
 export function scanAgents(): string[] {
   if (!existsSync(AGENTS_DIR)) return []
   try {

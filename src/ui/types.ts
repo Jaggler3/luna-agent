@@ -42,6 +42,7 @@ export const slashCommands = [
   { command: '/t', description: 'Alias for /thought' },
   { command: '/thought <n>', description: 'Toggle a specific assistant thinking block' },
   { command: '/t <n>', description: 'Alias for /thought <n>' },
+  { command: '/rename <n>', description: 'Rename the active conversation' }
 ]
 
 export type { GitDiffSection, GitFileChange }

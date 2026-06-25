@@ -1,5 +1,5 @@
 import { log } from '../config'
-import { activeAgent, agents, activeId, scanAgents, switchAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, clearActiveConversation } from '../store'
+import { activeAgent, renameActiveAgent, createNewAgent, closeCurrentAgent, switchToNextAgent, switchToPrevAgent, clearActiveConversation } from '../store'
 import { sendMessage, resetActiveAgentToBoilerplate } from '../daemon'
 import { toggleLatestThought, updateConversation, updateActivity } from './updaters'
 import {
@@ -98,6 +98,12 @@ export function handleSlashCommand(value: string): boolean {
     const parts = value.split(' ')
     const idx = parseInt(parts[1], 10)
     if (!isNaN(idx)) toggleLatestThought(idx)
+    return true
+  }
+  if(value.startsWith('/rename')) {
+    const parts = value.split(' ')
+    const newName = parts.slice(1).join(" ")
+    if (newName) renameActiveAgent(newName)
     return true
   }
   return false
