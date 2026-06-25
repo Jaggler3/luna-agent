@@ -22,10 +22,12 @@ export function createReceiveQueue(): {
     }
   }
 
+  const doneResult = (): IteratorResult<GatewayMessage> => ({ value: undefined as GatewayMessage | undefined, done: true } as IteratorResult<GatewayMessage>)
+
   function close() {
     closed = true
     while (waiters.length > 0) {
-      waiters.shift()?.resolve({ value: undefined as any, done: true })
+      waiters.shift()?.resolve(doneResult())
     }
   }
 
@@ -36,11 +38,11 @@ export function createReceiveQueue(): {
     return {
       [Symbol.asyncIterator]() { return this },
       next(): Promise<IteratorResult<GatewayMessage>> {
-        if (returned) return Promise.resolve({ value: undefined as any, done: true })
+        if (returned) return Promise.resolve(doneResult())
         if (buffer.length > 0) {
           return Promise.resolve({ value: buffer.shift()!, done: false })
         }
-        if (closed) return Promise.resolve({ value: undefined as any, done: true })
+        if (closed) return Promise.resolve(doneResult())
         return new Promise((resolve) => {
           const waiter = { resolve }
           waiters.push(waiter)
@@ -53,9 +55,9 @@ export function createReceiveQueue(): {
           const idx = waiters.indexOf(waiter)
           if (idx !== -1) waiters.splice(idx, 1)
         }
-        return Promise.resolve({ value: undefined as any, done: true })
+        return Promise.resolve(doneResult())
       },
-    } as unknown as AsyncGenerator<GatewayMessage>
+    }
   }
 
   return {
