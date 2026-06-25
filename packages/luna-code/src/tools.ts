@@ -167,8 +167,13 @@ export async function executeTool(tc: ToolCall): Promise<string> {
         return `edited ${args.path}`
       }
       case 'bash': {
+        const cmd = String(args.command ?? '')
+        if (!cmd.trim()) return '(empty command)'
+        if (cmd.length > 16_384) return '(command too long)'
+        const dangerous = /(\brm\s+[-][^]*?\b\/\s)|(\bmv\s+\/\s)|(\bsudo\b)|(>\s*\/dev\/(sda|sdb|sdc|nvme|disk))|(:\(\)\s*\{.*:\s*\|:\s*\})/.test(cmd)
+        if (dangerous) return '(command rejected: potentially destructive)'
         try {
-          const { stdout, stderr } = await execAsync(args.command, { cwd: CWD, maxBuffer: 10 * 1024 * 1024 })
+          const { stdout, stderr } = await execAsync(cmd, { cwd: CWD, maxBuffer: 10 * 1024 * 1024 })
           return stdout || stderr || '(no output)'
         } catch (err: any) {
           const out = err.stdout ? `stdout:\n${err.stdout}` : ''
