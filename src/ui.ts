@@ -1083,56 +1083,64 @@ export function handleSlashCommand(value: string): boolean {
 }
 
 // ── Keyboard / Input bindings ──────────────────────────────────
-renderer.keyInput.on("keypress", (event) => {
-  if (event.ctrl && event.shift && event.name === "c") {
-    event.preventDefault()
-    copySelection()
-    return
-  }
-  if (event.name === "tab") {
-    event.preventDefault()
-    if (event.shift) switchToPrevAgent()
-    else switchToNextAgent()
-    return
-  }
-  if (event.ctrl && event.name === "n") {
-    event.preventDefault()
-    createNewAgent()
-    return
-  }
-  if (event.ctrl && event.name === "w") {
-    event.preventDefault()
-    closeCurrentAgent()
-    return
-  }
-  if (event.ctrl && event.name === "b") {
-    event.preventDefault()
-    toggleSidebar()
-    return
-  }
-  if (event.ctrl && event.name === "t") {
-    event.preventDefault()
-    toggleLatestThought()
-    return
-  }
+try {
+  renderer.keyInput.on("keypress", (event) => {
+    if (event.ctrl && event.shift && event.name === "c") {
+      event.preventDefault()
+      copySelection()
+      return
+    }
+    if (event.name === "tab") {
+      event.preventDefault()
+      if (event.shift) switchToPrevAgent()
+      else switchToNextAgent()
+      return
+    }
+    if (event.ctrl && event.name === "n") {
+      event.preventDefault()
+      createNewAgent()
+      return
+    }
+    if (event.ctrl && event.name === "w") {
+      event.preventDefault()
+      closeCurrentAgent()
+      return
+    }
+    if (event.ctrl && event.name === "b") {
+      event.preventDefault()
+      toggleSidebar()
+      return
+    }
+    if (event.ctrl && event.name === "t") {
+      event.preventDefault()
+      toggleLatestThought()
+      return
+    }
 
-  const typedChar = event.sequence && event.sequence.length === 1 ? event.sequence : null
-  if (
-    renderer.currentFocusedRenderable !== input
-    && typedChar
-    && !event.ctrl
-    && !event.meta
-  ) {
-    event.preventDefault()
-    input.focus()
-    input.insertText(typedChar)
-    updateSlashCommandHelp()
-  }
-})
+    const typedChar = event.sequence && event.sequence.length === 1 ? event.sequence : null
+    if (
+      renderer.currentFocusedRenderable !== input
+      && typedChar
+      && !event.ctrl
+      && !event.meta
+    ) {
+      event.preventDefault()
+      input.focus()
+      input.insertText(typedChar)
+      updateSlashCommandHelp()
+    }
+  })
+} catch (e) {
+  log('keypress handler registration failed', String(e))
+}
 
-(renderer as any).on('selection', (selection: any) => {
-  copySelection(selection)
-})
+try {
+  (renderer as any).on('selection', (selection: any) => {
+    copySelection(selection)
+  })
+} catch (e) {
+  log('selection handler registration failed', String(e))
+}
 
 // ── Observers for Store Events ──────────────────────────────────
 storeEmitter.on('update', () => {
