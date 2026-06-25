@@ -1,4 +1,3 @@
-import { log } from '../config'
 import { storeEmitter } from '../store'
 import { collectGitActivity as collectGitActivitySnapshot } from '../git-activity'
 import { box, makeDebouncedUpdate } from './helpers'
