@@ -6,9 +6,10 @@ import { SyntaxStyle } from '@opentui/core'
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url))
 
-export const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
-export const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 export const APP_ROOT = resolve(SRC_DIR, '..')
+export const LOG_FILE = join(homedir(), '.luna-code', 'harness.log')
+export const DEBUG_LOG = join(APP_ROOT, 'debug.log')
+export const AGENTS_DIR = join(homedir(), '.luna-code', 'agents')
 export const DEFAULT_AGENT_TIMEOUT_MS = 120_000
 export const AGENT_TIMEOUT_MS = (() => {
   const raw = process.env.LUNA_AGENT_TIMEOUT_MS
@@ -23,7 +24,24 @@ export function log(...args: unknown[]) {
   try {
     const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`
     appendFileSync(LOG_FILE, line + '\n')
+    appendFileSync(DEBUG_LOG, line + '\n')
   } catch { }
+}
+
+process.on('uncaughtException', (err) => {
+  log('UNCAUGHT EXCEPTION', err.message, err.stack ?? '')
+  console.error('UNCAUGHT EXCEPTION:', err)
+})
+
+process.on('unhandledRejection', (reason) => {
+  log('UNHANDLED REJECTION', String(reason))
+  console.error('UNHANDLED REJECTION:', reason)
+})
+
+const origConsoleError = console.error
+console.error = (...args: unknown[]) => {
+  log('CONSOLE.ERROR', ...args)
+  origConsoleError(...args)
 }
 
 export function currentWorkspaceCwd(): string {
