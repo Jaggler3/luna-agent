@@ -174,6 +174,10 @@ export function updateActivity() {
 
     for (const change of changes) {
       const next = makeActivityBlock(change)
+      // Attach click handler to toggle block expansion when header is clicked
+      next.header.onMouseDown = (ev: { button: number }) => {
+        if (ev.button === 0) toggleActivityBlock(next.key)
+      }
       next.expanded = previousExpanded.get(next.key) ?? false
       next.body.visible = next.expanded
       next.header.content = makeActivityHeader(change, next.expanded)
